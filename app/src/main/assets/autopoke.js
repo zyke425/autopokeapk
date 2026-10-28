@@ -66,7 +66,7 @@
         return { button, identity: hash(identity), key: hash(identity + '|' + (counter ? counter[0] : text)) };
     }
     let state = null, pending = null, prepared = null, authorizedToken = null;
-    let readySince = 0, stalledSince = 0, healthySince = 0;
+    let readySince = 0, stalledSince = 0, healthySince = 0, blankSince = 0;
     let dirty = false, networkRestricted = false, networkError = false, networkInFlight = 0;
     function readErrors(value) {
         if (!value || typeof value !== 'object') return;
@@ -153,7 +153,7 @@
             return value;
         };
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
-        if (!cfg.running || document.hidden) { readySince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
+        if (!cfg.running || document.hidden) { readySince = 0; stalledSince = 0; blankSince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
         if (state.held) return result('restricted', 'Facebook reported a restriction. Check it manually before resuming.');
         const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"],h1,h2')).find(el => visible(el)
             && /rate limit exceeded|temporarily blocked|try again later|going too fast|we limit how often/i.test(el.textContent || ''));
@@ -162,7 +162,8 @@
             return result('restricted', 'Facebook reported a restriction. Auto-poking and refresh are paused.');
         }
         if (/^\/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.]|$)/i.test(location.pathname)
-            || Array.from(document.querySelectorAll('input[type="password"]')).some(visible)) {
+            || Array.from(document.querySelectorAll('input[type="password"],input[name="email"],input[autocomplete="one-time-code"],iframe[src*="captcha"]')).some(visible)) {
+            blankSince = 0;
             readySince = 0; return result('login', 'Sign in to Facebook, then tap Open Pokes.');
         }
         if (pending && now - pending.sentAt >= 90000) {
@@ -178,12 +179,27 @@
         if (now < state.retryAt) return result('waiting', 'A Facebook request failed. Retrying in ' + Math.ceil((state.retryAt - now) / 1000) + 's.');
         if (state.retryAt) { state.retryAt = 0; dirty = true; return result('refresh', 'Reloading after the temporary error.'); }
         if (document.readyState !== 'complete' || !document.body) { readySince = 0; return result('loading', 'Waiting for Facebook to finish loading…'); }
+        const exactRoute = /(?:^|\/)pokes(?:\.php)?\/?$/.test(location.pathname);
+        const bodyText = normalize(document.body.innerText);
+        const hiddenRoot = [document.documentElement, document.body].some(el => {
+            const style = getComputedStyle(el);
+            return style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0;
+        });
+        const empty = hiddenRoot || (!bodyText && !Array.from(document.querySelectorAll('input:not([type="hidden"]),textarea,select')).some(visible));
+        if (empty && (exactRoute || cfg.pokesExpected === true)) {
+            readySince = 0;
+            // An optimistic UI update can temporarily remove the whole list.
+            // Keep the request and the durable guard intact until it finishes.
+            if (pending && networkInFlight) { blankSince = 0; return result('waiting', 'Waiting for Facebook’s request to finish…'); }
+            if (!blankSince) blankSince = now;
+            if (now - blankSince >= 10000) return result('blank', 'Facebook returned a blank page. Recovering the browser…', { blank: true });
+            return result('rendering', 'Facebook is loading. Checking the blank page…', { blank: true });
+        }
+        blankSince = 0;
         const buttons = backs(document).filter(visible);
         const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'));
-        const exactRoute = /(?:^|\/)pokes(?:\.php)?\/?$/.test(location.pathname);
         const heading = headings.some(el => visible(el) && normalize(el.textContent) === 'pokes')
             || Array.from(document.querySelectorAll('span')).some(el => visible(el) && normalize(el.textContent) === 'pokes');
-        const bodyText = normalize(document.body.innerText);
         const evidence = /friends you poked|friends who poked you|poked you|suggested pokes|no pokes|no new pokes|\d[\d,]*\s+pokes\b/.test(bodyText)
             || headings.some(el => visible(el) && normalize(el.textContent) === 'suggested');
         // Path alone is insufficient: don't reload an unrendered shell forever.

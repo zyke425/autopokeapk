@@ -6,4 +6,5 @@ local.properties
 *.jks
 *.keystore
 node_modules/
+.local-signing/
 test-results/

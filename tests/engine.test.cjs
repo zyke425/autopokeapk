@@ -327,3 +327,80 @@ test('relative times in text-only person rows do not create a second identity', 
         assert.equal((await f.tick(start + 30000, { state: r.state })).kind, 'watching');
     } finally { await f.context.close(); }
 });
+
+test('a completely blank Pokes document triggers recovery after a 10-second grace period', async () => {
+    const f = await fixture('<html><body></body></html>');
+    try {
+        assert.equal((await f.tick()).kind, 'rendering');
+        assert.equal((await f.tick(start + 9999)).kind, 'rendering');
+        assert.equal((await f.tick(start + 10000)).kind, 'blank');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('hidden text and script tags do not mask an otherwise blank page', async () => {
+    const f = await fixture('<html><body><span hidden>Pokes</span><script>window.shell=true;</script>  </body></html>');
+    try {
+        await f.tick();
+        assert.equal((await f.tick(start + 10000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});
+test('an invisible root is treated as blank even when its DOM still contains Pokes', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        await f.page.evaluate(() => document.body.style.opacity = '0');
+        assert.equal((await f.tick()).kind, 'rendering');
+        assert.equal((await f.tick(start + 10000)).kind, 'blank');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('redirected empty root routes recover only when native code expects Pokes', async () => {
+    for (const expected of [true, false]) {
+        const f = await fixture('<html><body></body></html>', 'https://www.facebook.com/');
+        try {
+            await f.tick(start, { pokesExpected: expected });
+            assert.equal((await f.tick(start + 10000, { pokesExpected: expected })).kind, expected ? 'blank' : 'offpage');
+        } finally { await f.context.close(); }
+    }
+});
+test('late-arriving content clears the blank-page timer', async () => {
+    const f = await fixture('<html><body></body></html>');
+    try {
+        await f.tick();
+        await f.page.evaluate(() => document.body.innerHTML = '<h1>Pokes</h1><h2>Suggested</h2>');
+        assert.equal((await f.tick(start + 9000)).kind, 'watching');
+        await f.page.evaluate(() => document.body.innerHTML = '');
+        assert.equal((await f.tick(start + 10000)).kind, 'rendering');
+        assert.equal((await f.tick(start + 19999)).kind, 'rendering');
+        assert.equal((await f.tick(start + 20000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});
+test('blank-page recovery never interrupts login or one-time-code entry', async () => {
+    for (const input of ['<input type="password">', '<input name="email">', '<input autocomplete="one-time-code">']) {
+        const f = await fixture('<html><body>' + input + '</body></html>');
+        try {
+            assert.equal((await f.tick()).kind, 'login');
+            assert.equal((await f.tick(start + 120000)).kind, 'login');
+        } finally { await f.context.close(); }
+    }
+});
+test('a blank optimistic update waits for the poke request before recovering', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => window.fetch = () => new Promise(resolve => { window.finishRequest = resolve; }));
+        await f.page.evaluate(script); await f.tick();
+        await f.page.evaluate(() => document.body.innerHTML = '');
+        assert.equal((await f.tick(start + 20000)).kind, 'waiting');
+        await f.page.evaluate(async () => { finishRequest(new Response('{}')); await new Promise(r => setTimeout(r, 20)); });
+        assert.equal((await f.tick(start + 21000)).kind, 'rendering');
+        assert.equal((await f.tick(start + 31000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});
+test('Stop resets the blank-page grace period on resume', async () => {
+    const f = await fixture('<html><body></body></html>');
+    try {
+        await f.tick(); await f.tick(start + 5000, { running: false });
+        assert.equal((await f.tick(start + 60000)).kind, 'rendering');
+        assert.equal((await f.tick(start + 70000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});

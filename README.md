@@ -1,12 +1,22 @@
 # AutoPoke for Android
 
-Current APK: **1.1.0** (version code 2).
+Current APK: **1.1.1** (version code 3).
 
 A standalone Android version of the supplied **Facebook Autopoke GUI 2.12** userscript. Opens Facebook in an in-app WebView and keeps the controls in Android's own UI, above the page.
 
 **[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
 
 The checked-in APK was compiled and signature-verified locally. Android lint passed with no errors and the offline browser checks passed. GitHub Actions could not start its jobs because GitHub reported that the account is locked due to a billing issue. The APK above is available independently of Actions; automatic prereleases require a working runner.
+
+## Changes in 1.1.1
+
+- Detect a completed Pokes document that stays empty or invisible for 10 seconds, including an empty root URL reached while opening Pokes. Reload it once, then recreate the WebView if the problem repeats. Three failed repairs require a manual restart; a minute of healthy operation restores the repair budget.
+- Automatically replace a crashed renderer. On Android 10 and newer, also handle the renderer's unresponsive callback. A missing script callback or repeated empty results trigger browser recovery.
+- Preserve Facebook cookies and website storage during browser replacement, along with the native click-attempt total and duplicate-click reservations. Restrictions remain paused.
+- Display a recovery message over the browser area while it is blank. Keep loading checks active when page-finished callbacks are delayed, and request a redraw after resuming or first rendering Pokes.
+- Inject the engine once per document and avoid resending saved records on every poll. Trim oversized Pokes navigation history to reduce long-session work and retained history.
+
+**Installation change:** the temporary signing key used for 1.0.0/1.1.0 is no longer available. Version 1.1.1 uses a new signing key, so uninstall the older APK first and sign in again. The new private key has been backed up separately for future local updates. It is never committed to this repository.
 
 ## Changes in 1.1.0
 
@@ -17,12 +27,12 @@ The checked-in APK was compiled and signature-verified locally. Android lint pas
 - Detect restriction headings even when Facebook replaces the Pokes view, and keep restriction state writes ordered with click reservations.
 - Preserve row identity when a relative timestamp changes in text-only layouts.
 
-The update uses the same local debug signing certificate as the checked-in 1.0.0 APK, so it can be installed over that build without clearing its sign-in. It does not prevent Facebook from rejecting actions or enforcing its limits.
+Versions 1.0.0 and 1.1.0 shared a signing certificate. None of these releases prevent Facebook from rejecting actions or enforcing its limits.
 
 ## Install and use
 
 1. Download **AutoPoke-debug.apk** using the link above. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
-2. Open the APK on your Android phone. Allow installation from the browser/file manager when Android asks. Requires **Android 8.0 or newer**.
+2. If using 1.0.0 or 1.1.0, uninstall it first; Android will clear its local sign-in and settings. Then open the new APK. Allow installation from the browser/file manager when Android asks. Requires **Android 8.0 or newer**.
 3. Open **AutoPoke** and sign in to your Facebook account on Facebook's page inside the app.
 4. Tap **Open Pokes**, then **Start loop**. Keep the app open.
 5. Tap **Stop loop** any time to stop scanning and automatic refreshes.
@@ -39,8 +49,9 @@ No Tampermonkey or accessibility service is needed. This app uses its own sign-i
 | Click spacing | Default minimum **7 seconds**, editable from 5 to 300 seconds. No human-behavior disguise or rate-limit bypass. |
 | Duplicate guard | Android durably saves a reservation before clicking. Same unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. An interrupted reservation can defer a row even if its click was never sent. A new poke count is a new signature. Guards and attempts survive reloads and restarts. |
 | Restriction | A visible Facebook restriction, GraphQL rate-limit error, or HTTP 429 stops the loop. Check Facebook manually before using **Review pause**. |
-| Temporary failure | Observed request errors back off for 30 seconds, increasing to 5 minutes after repeated failures. Pokes-page load/server errors use bounded retries. A 45-second loading/rendering watchdog starts recovery; an unknown poke result after 90 seconds or unresponsive script callback pauses for manual review. |
-| Login / other routes | No automatic clicks or refreshes. Tap **Open Pokes** after finishing sign-in. |
+| Temporary failure | Observed request errors back off for 30 seconds, increasing to 5 minutes after repeated failures. Pokes-page load/server errors use bounded retries. A 45-second loading/rendering watchdog starts recovery; an unknown poke result after 90 seconds pauses for manual review. |
+| Blank / crashed browser | A completed empty or invisible document gets 10 seconds to render, followed by a 1-second reload delay. Repeated failures recreate the browser after 3 and 10 seconds. A crashed or unresponsive browser skips directly to replacement. Recovery keeps cookies, native state, and the ON setting; repeated failures eventually pause. |
+| Login / other routes | No automatic clicks or refreshes on login, checkpoint, email, password, or verification-code entry pages. An empty root redirect from an explicitly opened Pokes page can be repaired. Tap **Open Pokes** after finishing sign-in. |
 | Screen | Optional keep-awake setting while running; enabled by default. |
 | Layout | Mobile by default; **Desktop Facebook layout** is available in Settings. |
 | App hidden / closed | Native polling and WebView timers pause while hidden. Returns to the saved ON/OFF setting when reopened. No closed-app or screen-off execution is promised. |
@@ -66,13 +77,15 @@ Requires JDK 17, Android SDK platform 35 and build tools 35.0.0. The Gradle wrap
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
+For consistent local update signatures, restore the private signing backup to the ignored path `.local-signing/autopoke-debug.keystore` before building. The build uses this key when it exists. CI runners without the private key use their own development certificate.
+
 ```sh
 npm ci
 npx playwright install chromium
 npm test
 ```
 
-30 browser tests intercept every navigation with offline fixture HTML. They do not contact Facebook or send pokes. They cover mobile routes, reload persistence, new poke counts, duplicate retries, suggested-button exclusion, disabled/hidden controls, login and restriction pauses, request recovery, timing, interrupted reservations, and adaptive idle delays. Three JVM unit tests check the page-recovery retry budget and deadlines. A physical Android device and live signed-in Facebook session have not been tested.
+38 browser tests intercept every navigation with offline fixture HTML. They do not contact Facebook or send pokes. They cover mobile routes, reload persistence, new poke counts, duplicate retries, suggested-button exclusion, disabled/hidden controls, login and restriction pauses, request recovery, timing, interrupted reservations, adaptive idle delays, blank pages, invisible roots, and late rendering. Eight JVM unit tests check page recovery, blank-browser escalation, stable recovery, and retry budgets. The Android fix has not been verified on the reporting phone or a live signed-in Facebook session.
 
 GitHub Actions runs browser checks and Android compile/lint. A passing push to `main` publishes a debug-signed APK as a development prerelease, with an artifact copy kept for 30 days. Different machines/runners have different debug certificates: uninstall the previous development APK first if an update reports a signature conflict. Production signing and automatic app updates are not configured.
 
@@ -81,6 +94,7 @@ GitHub Actions runs browser checks and Android compile/lint. A passing push to `
 - `app/src/main/java/io/github/zyke425/autopoke/MainActivity.java`: native UI, WebView navigation, lifecycle, settings, and persistence.
 - `app/src/main/assets/autopoke.js`: visible-control detector and poke-back state machine.
 - `app/src/main/java/io/github/zyke425/autopoke/LoadRecovery.java`: bounded page-recovery delays.
+- `app/src/main/java/io/github/zyke425/autopoke/BrowserRecovery.java`: blank/crashed browser repair escalation and budget.
 - `tests/engine.test.cjs`: offline browser regression tests.
 
 The interaction flow is adapted from the userscript supplied by the repository owner, which credited **augesrob (original); revised GUI and loop**. This project is unofficial and is not affiliated with Facebook or Meta.
