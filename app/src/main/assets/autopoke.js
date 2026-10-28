@@ -154,8 +154,9 @@
         const refreshMs = Math.max(1000, Math.min(300000, Number(cfg.refreshMs) || 1000));
         const gapMs = Math.max(5000, Math.min(300000, Number(cfg.gapMs) || 7000));
         const carrier = window.__autoPokeBasic ? window.__autoPokeBasic.read() : { state: 'unknown' };
+        let viewReady = false;
         const result = (kind, message, extra = {}) => {
-            const value = { kind, message, attempts: state.attempts, detected: 0, basicState: carrier.state,
+            const value = { kind, message, attempts: state.attempts, detected: 0, ready: viewReady, basicState: carrier.state,
                 requestPending: !!(pending || prepared), ...extra };
             if (dirty) { value.state = JSON.parse(JSON.stringify(state)); dirty = false; }
             return value;
@@ -209,6 +210,7 @@
             return result('offpage', expected ? 'Waiting for the Pokes view to render…' : 'Tap Open Pokes. The loop resumes on the Pokes page.');
         }
         stalledSince = 0;
+        viewReady = true;
         const items = buttons.map(person).filter(Boolean);
         if (prepared) {
             if (now - prepared.at >= 15000) { prepared = null; return result('watching', 'The saved click expired. Watching for a new eligible poke.'); }

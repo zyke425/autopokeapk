@@ -809,3 +809,64 @@ test('direct banner text and decorative carrier icons are supported', async () =
     try { assert.deepEqual(await carrierState(f), { state: 'basic', label: 'Basic mode plus' }); assert.equal((await f.tick()).kind, 'clicked'); }
     finally { await f.context.close(); }
 });
+
+test('Basic mode text-only links use the same guarded poke-back loop as buttons', async () => {
+    for (const label of ['Basic mode plus', 'Data mode']) {
+        const html = basicBar(label, label === 'Data mode' ? 'Go to Free' : 'Buy data')
+            + '<h3>Pokes</h3><table><tr><td><a href="/alex">Alex</a> poked you <span>1,043 times in a row</span></td><td><a id="back" href="/pokes/?poke_target=123" onclick="event.preventDefault();window.clicks=(window.clicks||0)+1;this.textContent=\'Poked\'">Poke back</a></td></tr></table><a id="buy" href="/mobile-center/">Buy data</a>';
+        const f = await fixture(html, 'https://www.facebook.com/pokes.php');
+        try {
+            const first = await f.tick(); assert.equal(first.kind, 'clicked'); assert.equal(first.ready, true);
+            assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+            await f.page.reload(); await f.page.evaluate(script);
+            assert.equal((await f.tick(start + 2000, { state: first.state })).kind, 'watching');
+            await f.page.locator('tr span').evaluate(el => el.textContent = '1,044 times in a row');
+            assert.equal((await f.tick(start + 8000)).kind, 'clicked');
+            assert.equal(await f.page.evaluate(() => window.buys || 0), 0);
+        } finally { await f.context.close(); }
+    }
+});
+test('Basic text-only submit controls are eligible without photos or rich rows', async () => {
+    const html = basicBar() + '<h2>Pokes</h2><div><a href="/alex">Alex</a> poked you 1,043 times in a row <form action="/pokes.php" method="post"><input type="submit" value="Poke back" onclick="event.preventDefault();window.clicks=(window.clicks||0)+1;this.disabled=true"></form></div>';
+    const f = await fixture(html, 'https://www.facebook.com/pokes.php');
+    try {
+        const r = await f.tick(); assert.equal(r.kind, 'clicked'); assert.equal(r.basicState, 'basic'); assert.equal(r.ready, true);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+        assert.equal(await f.page.evaluate(() => clicks), 1); assert.equal(await f.page.evaluate(() => window.buys || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('full-page Basic link navigation preserves the pre-click duplicate reservation', async () => {
+    const html = basicBar() + '<h2>Pokes</h2><div><a href="/alex">Alex</a> poked you 19 times in a row <a href="/pokes.php?poke_target=123">Poke back</a></div>';
+    const f = await fixture(html, 'https://www.facebook.com/pokes.php');
+    try {
+        const reservation = await f.rawTick(); assert.equal(reservation.kind, 'prepared');
+        const navigated = f.page.waitForURL('**/pokes.php?poke_target=123');
+        try { await f.execute(reservation.token); } catch (error) { assert.match(error.message, /context was destroyed|navigation/i); }
+        await navigated; await f.page.waitForLoadState(); await f.page.evaluate(script);
+        const restored = await f.tick(start + 15000, { state: reservation.state });
+        assert.equal(restored.kind, 'watching'); assert.equal(restored.ready, true);
+        assert.equal(restored.state.records[0].tries, 1);
+    } finally { await f.context.close(); }
+});
+test('only a usable Pokes view acknowledges readiness to the native deadline', async () => {
+    for (const [html, url, expected] of [
+        [pageHtml(row()), 'https://www.facebook.com/pokes', true],
+        [pageHtml(row()), 'https://www.facebook.com/pokes.php', true],
+        ['<html><body></body></html>', 'https://www.facebook.com/pokes', false],
+        ['<html><body>Loading…</body></html>', 'https://www.facebook.com/pokes', false],
+        ['<input type="password">', 'https://www.facebook.com/login/', false]
+    ]) {
+        const f = await fixture(html, url);
+        try { assert.equal((await f.rawTick()).ready, expected); }
+        finally { await f.context.close(); }
+    }
+});
+test('a valid page waiting on a click gap still acknowledges readiness', async () => {
+    const f = await fixture(basicBar() + pageHtml(row()));
+    try {
+        const r = await f.tick(start, { state: { nextAt: start + 300000 } });
+        assert.equal(r.kind, 'waiting'); assert.equal(r.ready, true);
+        assert.equal((await f.tick(start + 50000)).ready, true);
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});

@@ -67,6 +67,7 @@ public final class MainActivity extends Activity {
     private final BrowserRecovery browserRecovery = new BrowserRecovery();
     private final MobileRecovery mobileRecovery = new MobileRecovery();
     private final WhiteFrameWatchdog whiteFrames = new WhiteFrameWatchdog();
+    private final PageReadyWatchdog pageReady = new PageReadyWatchdog();
     private WebView web;
     private FrameLayout browserHost;
     private TextView browserNotice;
@@ -162,7 +163,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.5", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.6", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -189,7 +190,7 @@ public final class MainActivity extends Activity {
         address = text("facebook.com · secure connection", 11, MUTED); address.setSingleLine(true);
         browserBar.addView(address, new LinearLayout.LayoutParams(0, dp(40), 1)); address.setGravity(Gravity.CENTER_VERTICAL);
         Button reload = button("↻", Color.TRANSPARENT, MINT); reload.setContentDescription("Reload Facebook page");
-        reload.setOnClickListener(v -> { recovery.reset(); browserRecovery.reset(); if (web != null) { failed = false; web.reload(); } else openPokes(); });
+        reload.setOnClickListener(v -> { recovery.reset(); browserRecovery.reset(); if (web != null) { finishPageWait(); failed = false; web.reload(); } else openPokes(); });
         browserBar.addView(reload, new LinearLayout.LayoutParams(dp(48), dp(44))); root.addView(browserBar);
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         root.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
@@ -248,7 +249,10 @@ public final class MainActivity extends Activity {
                 if (view != web) return true;
                 if (!request.isForMainFrame()) return false;
                 String url = request.getUrl().toString();
-                if (trusted(url)) { if (request.hasGesture() && !pokesUrl(url)) pokesExpected = false; return false; }
+                if (trusted(url)) {
+                    if (request.hasGesture() && !pokesUrl(url)) { pokesExpected = false; finishPageWait(); }
+                    return false;
+                }
                 // Never automatically launch apps/custom schemes from Facebook content.
                 if (request.hasGesture() && "https".equals(request.getUrl().getScheme())) {
                     new AlertDialog.Builder(MainActivity.this).setMessage("Open this link in your browser?\n" + request.getUrl().getHost())
@@ -266,7 +270,8 @@ public final class MainActivity extends Activity {
                 frameReady = false; clickPending = false;
                 carrierSequence++; carrierReading = false; handler.removeCallbacks(carrierPoll); updateBasicStatus("unknown");
                 if (!pokesExpected && !pokesUrl(url)) whiteFrames.reset();
-                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelEvaluationTimeout(); armLoadTimeout();
+                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelEvaluationTimeout();
+                if (authenticationUrl(url)) finishPageWait(); else armLoadTimeout();
                 address.setText(trusted(url) ? Uri.parse(url).getHost() + (basicMode ? " · carrier access unverified" : " · secure connection") : "Page blocked");
                 status.setText("Loading Facebook…");
                 if (!trusted(url)) { view.stopLoading(); pageError("Only secure Facebook pages can open inside this app."); }
@@ -274,7 +279,8 @@ public final class MainActivity extends Activity {
             }
             @Override public void onPageFinished(WebView view, String url) {
                 if (view != web || !url.equals(view.getUrl())) return;
-                cancelLoadTimeout();
+                // A completed document may still be an empty SPA. Only the
+                // engine's ready signal (or manual sign-in/setup) ends the deadline.
                 loading = false; CookieManager.getInstance().flush();
                 view.requestLayout(); view.invalidate();
                 if (!failed && active && trusted(url)) { schedule(250); scheduleCarrier(250); }
@@ -336,13 +342,24 @@ public final class MainActivity extends Activity {
             || (basicMode && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)));
     }
     private void cancelLoadTimeout() { if (loadTimeout != null) handler.removeCallbacks(loadTimeout); loadTimeout = null; }
+    private void finishPageWait() { cancelLoadTimeout(); pageReady.cancel(); }
+    private boolean authenticationUrl(String url) {
+        if (!trusted(url)) return false;
+        String path = Uri.parse(url).getPath();
+        return path != null && path.matches("(?i)/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.].*)?");
+    }
     private void armLoadTimeout() {
         cancelLoadTimeout();
-        final int generation = navigation;
+        if (!active || !running || recovering || failed || web == null || authenticationUrl(web.getUrl())
+            || !(pokesExpected || pokesUrl(web.getUrl()))) return;
+        pageReady.start(SystemClock.elapsedRealtime());
         loadTimeout = () -> {
-            if (generation == navigation && active && running && loading && web != null && (pokesUrl(web.getUrl()) || pokesExpected)) queueRecovery("The Facebook page took too long to load.");
+            if (!active || !running || recovering || failed || web == null || !pageReady.waiting()) return;
+            if (pageReady.remaining(SystemClock.elapsedRealtime()) > 0) { armLoadTimeout(); return; }
+            finishPageWait();
+            recoverUnrenderedPage("Facebook did not show a usable Pokes page. Retrying the mobile browser…");
         };
-        if (active) handler.postDelayed(loadTimeout, 45000);
+        handler.postDelayed(loadTimeout, pageReady.remaining(SystemClock.elapsedRealtime()));
     }
     private void cancelEvaluationTimeout() { if (evaluationTimeout != null) handler.removeCallbacks(evaluationTimeout); evaluationTimeout = null; }
     private void armEvaluationTimeout() {
@@ -359,7 +376,7 @@ public final class MainActivity extends Activity {
         if (recovering || web == null) return;
         if (!running) { pageError(message + " Tap ↻ to retry."); return; }
         loading = false; failed = true; evaluating = false; savingGuard = false; recovering = true;
-        navigation++; evaluationSequence++; handler.removeCallbacks(poll); cancelLoadTimeout(); cancelEvaluationTimeout();
+        navigation++; evaluationSequence++; handler.removeCallbacks(poll); finishPageWait(); cancelEvaluationTimeout();
         web.stopLoading();
         if (!recovery.queue(SystemClock.elapsedRealtime())) {
             recovering = false; setRunning(false); status.setText("Several page loads failed. Loop paused; check your connection and tap Start."); return;
@@ -369,7 +386,7 @@ public final class MainActivity extends Activity {
     private void queueBrowserRecovery(String message, boolean rendererLost) {
         if (recovering && repairingBrowser) return;
         navigation++; evaluationSequence++; evaluating = false; savingGuard = false; engineReady = false;
-        handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
+        handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); finishPageWait(); cancelEvaluationTimeout();
         loading = false; failed = true;
         if (!running) {
             recovering = false; repairingBrowser = false;
@@ -412,7 +429,7 @@ public final class MainActivity extends Activity {
 
     private void pageError(String message) {
         loading = false; failed = true; recovering = false; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
-        cancelLoadTimeout(); cancelEvaluationTimeout(); status.setText(message); showBrowserNotice(message);
+        finishPageWait(); cancelEvaluationTimeout(); status.setText(message); showBrowserNotice(message);
     }
     private void schedule(long delay) {
         handler.removeCallbacks(poll);
@@ -455,6 +472,7 @@ public final class MainActivity extends Activity {
                 JSONObject result = new JSONObject((String) decoded);
                 String kind = result.optString("kind");
                 clickPending = result.optBoolean("requestPending");
+                if (result.optBoolean("ready")) { loading = false; finishPageWait(); }
                 if (basicMode) updateBasicStatus(result.optString("basicState", "unknown"));
                 if ("reinject".equals(kind)) { engineReady = false; schedule(250); return; }
                 engineReady = true;
@@ -481,16 +499,17 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 if (!active || !running) { renderControls(); return; }
-                if (result.optBoolean("blank")) showBrowserNotice("Facebook is loading…\nThe app will recover if the page stays blank.");
-                else if (!"loading".equals(kind)) browserNotice.setVisibility(View.GONE);
+                // Keep Facebook visible and interactive during the grace period.
+                // An opaque native cover can conceal the page and occlude its renderer.
+                browserNotice.setVisibility(View.GONE);
                 status.setText(result.optString("message", "Watching for Poke back…"));
                 count.setText(result.optInt("attempts") + " click attempts · " + result.optInt("detected") + " detected");
-                if ("basic-setup".equals(kind)) { loading = false; cancelLoadTimeout(); }
+                if ("basic-setup".equals(kind) || "login".equals(kind)) { loading = false; finishPageWait(); }
                 if ("blank".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("error".equals(kind)) { setRunning(false); status.setText(result.optString("message")); return; }
                 if ("stalled".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("watching".equals(kind) || "clicked".equals(kind) || "prepared".equals(kind)) {
-                    pokesExpected = true; loading = false; cancelLoadTimeout(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
+                    pokesExpected = true; loading = false; finishPageWait(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
                     // Bound navigation history during long sessions of redirected refreshes.
                     if (historyChecked != navigation) {
                         historyChecked = navigation;
@@ -516,8 +535,10 @@ public final class MainActivity extends Activity {
         });
     }
     private void recoverUnrenderedPage(String message) {
-        boolean forceRecreate = !desktop && mobileRecovery.blank();
-        queueBrowserRecovery(message, forceRecreate);
+        if (!desktop) mobileRecovery.blank();
+        // Recreate before applying the compatibility agent, so changing it cannot
+        // start a second load in the old document. Cookies remain in the profile.
+        queueBrowserRecovery(message, !desktop);
     }
     private void checkVisibleFrame() {
         // A compositor can show white even while DOM checks say the page is ready.
@@ -567,8 +588,8 @@ public final class MainActivity extends Activity {
         if (value && !running) { recovery.reset(); browserRecovery.reset(); }
         running = value; prefs.edit().putBoolean("running", running).apply();
         handler.removeCallbacks(poll);
-        if (!running) { whiteFrames.reset(); recovering = false; handler.removeCallbacks(retryLoad); cancelLoadTimeout(); }
-        renderControls(); if (running) { if (loading) armLoadTimeout(); schedule(100); }
+        if (!running) { whiteFrames.reset(); recovering = false; handler.removeCallbacks(retryLoad); finishPageWait(); }
+        renderControls(); if (running) { armLoadTimeout(); schedule(100); }
     }
     private void renderControls() {
         if (toggle == null) return;
@@ -632,12 +653,13 @@ public final class MainActivity extends Activity {
             }).setNegativeButton("Cancel", null).show();
     }
     private void openPokes() {
-        basicSetupOpen = false;
+        finishPageWait(); basicSetupOpen = false;
         if (web == null) createBrowser();
         if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
         failed = false; recovering = false; repairingBrowser = false; pokesExpected = true; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
         // loadUrl also reloads an identical URL, without repeatedly growing WebView history.
         if (pokesAddress().equals(web.getUrl())) web.reload(); else web.loadUrl(pokesAddress());
+        armLoadTimeout();
     }
     private String pokesAddress() {
         return mobileRecovery.address(desktop, basicMode);
@@ -645,11 +667,7 @@ public final class MainActivity extends Activity {
     private void applyUserAgent() {
         web.setLayerType(!desktop && mobileRecovery.useSoftware() ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_NONE, null);
         web.getSettings().setBlockNetworkImage(dataSaver);
-        if (desktop) {
-            // Use the installed WebView's own Chrome version rather than a stale fixed UA.
-            web.getSettings().setUserAgentString(defaultUserAgent.replaceFirst("\\([^)]*\\)", "(X11; Linux x86_64)")
-                .replace("; wv", "").replace("Version/4.0 ", "").replace(" Mobile", ""));
-        } else web.getSettings().setUserAgentString(defaultUserAgent);
+        web.getSettings().setUserAgentString(mobileRecovery.userAgent(defaultUserAgent, desktop));
         web.getSettings().setUseWideViewPort(true); web.getSettings().setLoadWithOverviewMode(desktop);
     }
     private EditText number(LinearLayout form, String label, int value) {
@@ -708,7 +726,7 @@ public final class MainActivity extends Activity {
         if (recovering) { if (web != null) { web.onResume(); web.resumeTimers(); } updateRecovery(); return; }
         if (web != null) {
             web.onResume(); web.resumeTimers(); renderControls();
-            web.requestLayout(); web.invalidate();
+            web.requestLayout(); web.invalidate(); armLoadTimeout();
             if (loading) { armLoadTimeout(); schedule(250); }
             else if (evaluating) armEvaluationTimeout();
             else if (savingGuard) { /* The saved-guard callback resumes polling. */ }
@@ -717,7 +735,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onPause() {
         whiteFrames.reset(); carrierSequence++; carrierReading = false; handler.removeCallbacks(carrierPoll);
-        active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
+        active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); finishPageWait(); cancelEvaluationTimeout();
         if (web != null) { web.onPause(); web.pauseTimers(); CookieManager.getInstance().flush(); }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();
     }

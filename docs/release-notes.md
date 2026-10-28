@@ -1,18 +1,14 @@
-AutoPoke 1.1.5 — Facebook carrier Basic mode / Basic mode plus setup.
+AutoPoke 1.1.6 — remove the loading cover and recover stalled Basic/mobile Pokes views.
 
-Update directly from locally signed 1.1.1, 1.1.2 or 1.1.4. Confirm the app title says AutoPoke 1.1.5.
+Install over locally signed 1.1.1, 1.1.2, 1.1.4 or 1.1.5. Confirm the title says AutoPoke 1.1.6.
 
-1. Enable mobile data for your supported SIM and turn Wi-Fi off.
-2. Tap Basic mode → Open Facebook setup and sign in within AutoPoke.
-3. If Facebook offers Basic mode, read the offer and tap its Continue button yourself.
-4. Check Facebook's Basic mode plus banner, then tap Open Pokes → Start loop.
+- Keep Facebook visible while loading/checking, instead of hiding it behind AutoPoke's full-screen cover.
+- Wait for a usable Pokes view, with a native deadline that survives redirects and loaded-but-empty documents.
+- Leave sign-in and Facebook's Basic-mode consent screens available for manual completion.
+- Retry a blank mobile page in a fresh WebView using the installed engine's mobile-browser presentation. Preserve cookies and guards; retain the software-rendering fallback for repeated blanks.
+- Use the same Poke back and refresh loop for Basic and Data layouts. Offline fixtures cover text links, submit controls, full-page navigation and changing poke counts.
+- Keep request-failed countdowns and restriction holds removed. Do not switch to Data mode or buy data automatically.
 
-- Open the current carrier flow on the normal Facebook host with mobile layout, replacing the old free-host option.
-- Show whether a Basic/Data mode banner or out-of-data offer was detected. Profile selection and banner detection are not carrier billing verification.
-- Leave consent, purchases and carrier mode changes to the user. Automation waits for the actual offer to be handled, then resumes.
-- Basic profile is on by default; Desktop layout is available when it is off. Data saver remains a separate optional setting.
-- Keep mobile white-screen recovery and duplicate guards. Request-failed countdowns and automatic restriction holds remain removed.
+For carrier Basic mode: use mobile data with Wi-Fi off, open Basic mode setup, and tap Continue on Facebook's own offer if shown. Then use Open Pokes → Start loop.
 
-77 offline browser tests, 14 JVM tests, Android build/lint and signature verification validate the package. Actual carrier access, eligibility and Pokes availability need confirmation on the phone.
-
-Facebook and your carrier control availability, quota and charges. This app cannot grant free data, enroll your SIM, transfer Chrome's sign-in or guarantee an embedded WebView receives the carrier offer. Counts represent click attempts, not accepted pokes.
+82 offline browser tests, 21 JVM tests, Android build/lint and APK signature are checked. The reporting phone and live carrier access still need confirmation. Facebook/your carrier must provide Basic mode and expose Pokes; the app cannot grant free data or force acceptance of a poke.
