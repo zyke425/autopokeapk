@@ -153,13 +153,19 @@
         }
         const refreshMs = Math.max(1000, Math.min(300000, Number(cfg.refreshMs) || 1000));
         const gapMs = Math.max(5000, Math.min(300000, Number(cfg.gapMs) || 7000));
+        const carrier = window.__autoPokeBasic ? window.__autoPokeBasic.read() : { state: 'unknown' };
         const result = (kind, message, extra = {}) => {
-            const value = { kind, message, attempts: state.attempts, detected: 0, requestPending: !!(pending || prepared), ...extra };
+            const value = { kind, message, attempts: state.attempts, detected: 0, basicState: carrier.state,
+                requestPending: !!(pending || prepared), ...extra };
             if (dirty) { value.state = JSON.parse(JSON.stringify(state)); dirty = false; }
             return value;
         };
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
         if (!cfg.running || document.hidden) { readySince = 0; stalledSince = 0; blankSince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
+        if (carrier.state === 'offer') {
+            prepared = null; readySince = 0; stalledSince = 0; blankSince = 0;
+            return result('basic-setup', 'Tap Continue on Facebook’s Basic mode offer. The loop will resume after you finish.');
+        }
         if (/^\/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.]|$)/i.test(location.pathname)
             || Array.from(document.querySelectorAll('input[type="password"],input[name="email"],input[autocomplete="one-time-code"],iframe[src*="captcha"]')).some(visible)) {
             blankSince = 0;

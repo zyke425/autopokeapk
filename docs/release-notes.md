@@ -1,17 +1,18 @@
-AutoPoke 1.1.4 — remove request-failed countdowns and improve mobile blank-screen recovery.
+AutoPoke 1.1.5 — Facebook carrier Basic mode / Basic mode plus setup.
 
-Update directly from 1.1.1/1.1.2. Confirm the app title says AutoPoke 1.1.4. Uninstall 1.0.0/1.1.0 before installing because the signing key changed in 1.1.1.
+Update directly from locally signed 1.1.1, 1.1.2 or 1.1.4. Confirm the app title says AutoPoke 1.1.5.
 
-- Remove the “A Facebook request failed. Retrying…” check and automatic restriction holds.
-- Clear old saved retry/hold fields while preserving attempts and duplicate guards.
-- Continue normal scanning/refreshing after failed responses. Unrelated background requests cannot stall the loop.
-- Wait only for the current poke's request completion; preserve guards when a hung request times out and refreshes.
-- Detect hidden mobile page content, stalled document loading, and redirected shells.
-- Check sustained white browser output using a temporary memory-only sample.
-- Retry using the main host with mobile layout, then recreate with software rendering if blank output recurs.
-- Preserve cookies during browser replacement. Recovery remains bounded if Facebook cannot be restored.
-- Include Data saver and optional carrier Free Facebook settings. Carrier access is unverified; the app cannot provide free data.
+1. Enable mobile data for your supported SIM and turn Wi-Fi off.
+2. Tap Basic mode → Open Facebook setup and sign in within AutoPoke.
+3. If Facebook offers Basic mode, read the offer and tap its Continue button yourself.
+4. Check Facebook's Basic mode plus banner, then tap Open Pokes → Start loop.
 
-64 offline browser tests and 14 JVM tests cover these behaviors. Android compilation, lint and APK signature are checked before publication. Physical-phone rendering and live Facebook behavior still need confirmation.
+- Open the current carrier flow on the normal Facebook host with mobile layout, replacing the old free-host option.
+- Show whether a Basic/Data mode banner or out-of-data offer was detected. Profile selection and banner detection are not carrier billing verification.
+- Leave consent, purchases and carrier mode changes to the user. Automation waits for the actual offer to be handled, then resumes.
+- Basic profile is on by default; Desktop layout is available when it is off. Data saver remains a separate optional setting.
+- Keep mobile white-screen recovery and duplicate guards. Request-failed countdowns and automatic restriction holds remain removed.
 
-The loop runs while the app is open. Click counts are attempts; Facebook decides whether to accept them. This build does not inspect request error responses or bypass Facebook limits. Sign-in/TLS errors and repeated failed browser repairs still require attention.
+77 offline browser tests, 14 JVM tests, Android build/lint and signature verification validate the package. Actual carrier access, eligibility and Pokes availability need confirmation on the phone.
+
+Facebook and your carrier control availability, quota and charges. This app cannot grant free data, enroll your SIM, transfer Chrome's sign-in or guarantee an embedded WebView receives the carrier offer. Counts represent click attempts, not accepted pokes.

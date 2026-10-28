@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const script = fs.readFileSync(path.join(__dirname, '../app/src/main/assets/autopoke.js'), 'utf8');
+const script = fs.readFileSync(path.join(__dirname, '../app/src/main/assets/basic-mode.js'), 'utf8') + '\n'
+    + fs.readFileSync(path.join(__dirname, '../app/src/main/assets/autopoke.js'), 'utf8');
 let browser;
 const start = 1800000000000;
 before(async () => { browser = await chromium.launch({ headless: true, executablePath: process.env.AUTOPOKE_TEST_BROWSER || undefined }); });
@@ -698,4 +699,113 @@ test('successive incoming pokes keep looping across reloads and failed requests'
         }
         assert.equal(state.attempts, 24); assert.equal(state.records.length, 24);
     } finally { await f.context.close(); }
+});
+
+const basicBar = (label = 'Basic mode plus', action = 'Buy data') => `<header><span>${label}</span><button onclick="window.buys=(window.buys||0)+1">${action}</button></header>`;
+const basicOffer = (role = 'role="dialog"') => `<div id="carrier-offer" ${role}><h2>You’re out of data, but can still use Facebook</h2><p>With SMART, you can keep using Facebook until you buy data again.</p><a href="/mobile-center/">Go to Mobile Center</a><button id="continue" onclick="window.consents=(window.consents||0)+1;this.parentElement.remove()">CONTINUE</button></div>`;
+const carrierState = f => f.page.evaluate(() => window.__autoPokeBasic.read());
+
+test('detects the Basic mode plus bar shown in the supplied screenshot', async () => {
+    const f = await fixture(basicBar() + pageHtml(row()));
+    try {
+        assert.deepEqual(await carrierState(f), { state: 'basic', label: 'Basic mode plus' });
+        assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal(await f.page.evaluate(() => window.buys || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('reports a real carrier offer without accepting it or clicking behind it', async () => {
+    for (const role of ['role="dialog"', '']) {
+        const f = await fixture(basicBar() + basicOffer(role) + pageHtml(row()));
+        try {
+            assert.equal((await carrierState(f)).state, 'offer');
+            assert.equal((await f.tick()).kind, 'basic-setup');
+            assert.equal((await f.tick(start + 300000)).kind, 'basic-setup');
+            assert.equal(await f.page.evaluate(() => window.consents || window.clicks || window.buys || 0), 0);
+        } finally { await f.context.close(); }
+    }
+});
+test('manual Continue returns to the normal poke-back and refresh loop', async () => {
+    const f = await fixture(basicBar() + basicOffer() + pageHtml(row()));
+    try {
+        assert.equal((await f.tick()).kind, 'basic-setup');
+        await f.page.locator('#continue').click();
+        assert.equal((await carrierState(f)).state, 'basic');
+        const r = await f.tick(start + 1000); assert.equal(r.kind, 'clicked'); assert.equal(r.basicState, 'basic');
+        assert.equal((await f.tick(start + 2000)).kind, 'refresh');
+        assert.equal(await f.page.evaluate(() => consents), 1); assert.equal(await f.page.evaluate(() => window.buys || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('Basic mode inspection also works while the native loop is stopped', async () => {
+    const f = await fixture(basicBar() + basicOffer() + pageHtml(row()));
+    try {
+        const r = await f.tick(start, { running: false }); assert.equal(r.kind, 'paused'); assert.equal(r.basicState, 'offer');
+        assert.equal((await carrierState(f)).state, 'offer');
+        assert.equal(await f.page.evaluate(() => window.clicks || window.consents || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('Data mode is reported separately and does not assert free access', async () => {
+    const f = await fixture(basicBar('Data mode', 'Go to Free') + pageHtml(row()));
+    try {
+        assert.deepEqual(await carrierState(f), { state: 'data', label: 'Data mode' });
+        const r = await f.tick(); assert.equal(r.kind, 'clicked'); assert.equal(r.basicState, 'data');
+    } finally { await f.context.close(); }
+});
+test('a profile selection or arbitrary Basic mode text cannot fake an active banner', async () => {
+    for (const content of ['<p>Basic mode plus</p>', '<article>' + basicBar() + basicOffer() + '</article>', '<div role="feed">' + basicBar() + basicOffer() + '</div>']) {
+        const f = await fixture(content + pageHtml(row()));
+        try { assert.equal((await carrierState(f)).state, 'unknown'); assert.equal((await f.tick()).kind, 'clicked'); }
+        finally { await f.context.close(); }
+    }
+});
+test('hidden and offscreen offers do not block a visible Poke back', async () => {
+    for (const style of ['display:none', 'opacity:0', 'position:absolute;left:30000px']) {
+        const f = await fixture('<section style="' + style + '">' + basicBar() + basicOffer() + '</section>' + pageHtml(row()));
+        try { assert.equal((await carrierState(f)).state, 'unknown'); assert.equal((await f.tick()).kind, 'clicked'); }
+        finally { await f.context.close(); }
+    }
+});
+test('a banner far down the feed is not counted as Facebook carrier status', async () => {
+    const f = await fixture(pageHtml(row()) + '<div style="height:500px"></div>' + basicBar());
+    try { assert.equal((await carrierState(f)).state, 'unknown'); assert.equal((await f.tick()).kind, 'clicked'); }
+    finally { await f.context.close(); }
+});
+test('an offer appearing after reservation cancels execution without accepting consent', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reservation = await f.rawTick();
+        await f.page.locator('body').evaluate((el, html) => el.insertAdjacentHTML('afterbegin', html), basicOffer());
+        assert.equal((await f.execute(reservation.token)).kind, 'basic-setup');
+        await f.page.locator('#continue').click();
+        assert.equal((await f.execute(reservation.token)).kind, 'waiting');
+        assert.equal((await f.tick(start + 1000)).kind, 'watching');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('carrier status is never carried over to an unrelated origin', async () => {
+    const f = await fixture(basicBar() + basicOffer(), 'https://facebook.com.example.org/');
+    try { assert.equal((await carrierState(f)).state, 'unknown'); assert.equal((await f.tick()).kind, 'offpage'); }
+    finally { await f.context.close(); }
+});
+
+test('split carrier labels and offer headings remain recognizable', async () => {
+    const bar = '<header><span>Basic <strong>mode plus</strong></span><button>Buy data</button></header>';
+    const offer = basicOffer().replace('You’re out of data, but can still use Facebook', 'You’re out of <strong>data</strong>, but can still use <b>Facebook</b>');
+    const f = await fixture(bar + offer + pageHtml(row()));
+    try {
+        assert.equal((await carrierState(f)).state, 'offer');
+        assert.equal((await f.tick()).kind, 'basic-setup');
+        await f.page.locator('#continue').click();
+        assert.deepEqual(await carrierState(f), { state: 'basic', label: 'Basic mode plus' });
+        assert.equal((await f.tick(start + 1000)).kind, 'clicked');
+    } finally { await f.context.close(); }
+});
+test('unrelated Continue dialogs cannot trigger a carrier setup pause', async () => {
+    const f = await fixture('<div role="dialog"><h2>Continue browsing?</h2><button>Continue</button></div>' + pageHtml(row()));
+    try { assert.equal((await carrierState(f)).state, 'unknown'); assert.equal((await f.tick()).kind, 'clicked'); }
+    finally { await f.context.close(); }
+});
+test('direct banner text and decorative carrier icons are supported', async () => {
+    const f = await fixture('<header>🎁 Basic mode plus<button>📡 Buy data</button></header>' + pageHtml(row()));
+    try { assert.deepEqual(await carrierState(f), { state: 'basic', label: 'Basic mode plus' }); assert.equal((await f.tick()).kind, 'clicked'); }
+    finally { await f.context.close(); }
 });

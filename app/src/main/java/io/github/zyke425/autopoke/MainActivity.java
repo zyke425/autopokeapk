@@ -71,16 +71,18 @@ public final class MainActivity extends Activity {
     private FrameLayout browserHost;
     private TextView browserNotice;
     private SharedPreferences prefs;
-    private TextView status, count, address;
+    private TextView status, count, address, basicStatus;
     private Button toggle;
     private ProgressBar progress;
-    private String script, defaultUserAgent;
+    private String script, basicScript, defaultUserAgent;
     private JSONObject loopState = new JSONObject();
     private boolean running, active, loading, failed, evaluating;
     private boolean keepAwake, desktop, adaptive, recovering, savingGuard;
     private boolean repairingBrowser, engineReady, pokesExpected = true;
     private boolean dataSaver;
-    private boolean freeMode;
+    private boolean basicMode, carrierReading, basicSetupOpen;
+    private int carrierSequence;
+    private final Runnable carrierPoll = this::readCarrier;
     private boolean frameProbePending, clickPending, frameReady;
     private long lastFrameProbe;
     private int historyChecked = -1;
@@ -98,7 +100,9 @@ public final class MainActivity extends Activity {
         keepAwake = prefs.getBoolean("keepAwake", true);
         desktop = prefs.getBoolean("desktop", false);
         dataSaver = prefs.getBoolean("dataSaver", false);
-        freeMode = prefs.getBoolean("freeMode", false);
+        basicMode = prefs.getBoolean("basicMode", true);
+        if (basicMode) desktop = false;
+        prefs.edit().putBoolean("basicMode", basicMode).remove("freeMode").apply();
         adaptive = prefs.getBoolean("adaptive", true);
         refreshSeconds = clamp(prefs.getInt("refresh", 5), 1, 300);
         gapSeconds = clamp(prefs.getInt("gap", 7), 5, 300);
@@ -108,11 +112,8 @@ public final class MainActivity extends Activity {
         // duplicate reservations. A stopped loop still requires the Start button.
         for (String key : new String[]{"held", "holdReason", "holdSource", "failures", "retryAt"}) loopState.remove(key);
         prefs.edit().putString("state", loopState.toString()).apply();
-        try (InputStream in = getAssets().open("autopoke.js")) {
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192]; int length;
-            while ((length = in.read(buffer)) != -1) bytes.write(buffer, 0, length);
-            script = new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+        try {
+            script = readAsset("autopoke.js"); basicScript = readAsset("basic-mode.js");
         } catch (IOException error) {
             new AlertDialog.Builder(this).setMessage("The app's automation script could not be loaded.")
                 .setPositiveButton("Close", (d, w) -> finish()).setCancelable(false).show();
@@ -125,6 +126,14 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private String readAsset(String name) throws IOException {
+        try (InputStream in = getAssets().open(name)) {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192]; int length;
+            while ((length = in.read(buffer)) != -1) bytes.write(buffer, 0, length);
+            return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
     private static int clamp(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private LinearLayout column() { LinearLayout v = new LinearLayout(this); v.setOrientation(LinearLayout.VERTICAL); return v; }
@@ -153,7 +162,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.4", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.5", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -169,6 +178,12 @@ public final class MainActivity extends Activity {
         Button open = button("Open Pokes", Color.rgb(35, 50, 69), Color.WHITE);
         LinearLayout.LayoutParams openParams = weighted(); openParams.leftMargin = dp(8);
         open.setOnClickListener(v -> { recovery.reset(); browserRecovery.reset(); openPokes(); }); actions.addView(open, openParams); panel.addView(actions);
+        LinearLayout modeBar = new LinearLayout(this); modeBar.setGravity(Gravity.CENTER_VERTICAL);
+        basicStatus = text("Basic mode: checking Facebook…", 11, MUTED); basicStatus.setMaxLines(2);
+        modeBar.addView(basicStatus, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button basic = button("Basic mode", Color.rgb(35, 50, 69), Color.WHITE);
+        basic.setContentDescription("Set up Facebook carrier Basic mode"); basic.setOnClickListener(v -> showBasicSetup());
+        modeBar.addView(basic); panel.addView(modeBar);
         LinearLayout browserBar = new LinearLayout(this); browserBar.setGravity(Gravity.CENTER_VERTICAL);
         browserBar.setPadding(dp(12), 0, dp(6), 0); browserBar.setBackgroundColor(Color.rgb(25, 38, 55));
         address = text("facebook.com · secure connection", 11, MUTED); address.setSingleLine(true);
@@ -249,19 +264,20 @@ public final class MainActivity extends Activity {
                 navigation++; evaluationSequence++; evaluating = false; savingGuard = false; loading = true; failed = false; recovering = false;
                 engineReady = false; emptyScriptResults = 0; repairingBrowser = false; browserNotice.setVisibility(View.GONE);
                 frameReady = false; clickPending = false;
+                carrierSequence++; carrierReading = false; handler.removeCallbacks(carrierPoll); updateBasicStatus("unknown");
                 if (!pokesExpected && !pokesUrl(url)) whiteFrames.reset();
                 handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelEvaluationTimeout(); armLoadTimeout();
-                address.setText(trusted(url) ? Uri.parse(url).getHost() + (freeMode ? " · free access unverified" : " · secure connection") : "Page blocked");
+                address.setText(trusted(url) ? Uri.parse(url).getHost() + (basicMode ? " · carrier access unverified" : " · secure connection") : "Page blocked");
                 status.setText("Loading Facebook…");
                 if (!trusted(url)) { view.stopLoading(); pageError("Only secure Facebook pages can open inside this app."); }
-                else schedule(500);
+                else { schedule(500); scheduleCarrier(750); }
             }
             @Override public void onPageFinished(WebView view, String url) {
                 if (view != web || !url.equals(view.getUrl())) return;
                 cancelLoadTimeout();
                 loading = false; CookieManager.getInstance().flush();
                 view.requestLayout(); view.invalidate();
-                if (!failed && active && trusted(url)) schedule(250);
+                if (!failed && active && trusted(url)) { schedule(250); scheduleCarrier(250); }
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError error) {
                 if (view != web || !req.isForMainFrame() || failed) return;
@@ -316,7 +332,8 @@ public final class MainActivity extends Activity {
         NetworkCapabilities capabilities = manager.getNetworkCapabilities(manager.getActiveNetwork());
         // Some VPNs block Android's validation probes even while Facebook works.
         // Check for an Internet-capable network; real load errors still use backoff.
-        return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        return capabilities != null && (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            || (basicMode && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)));
     }
     private void cancelLoadTimeout() { if (loadTimeout != null) handler.removeCallbacks(loadTimeout); loadTimeout = null; }
     private void armLoadTimeout() {
@@ -421,7 +438,7 @@ public final class MainActivity extends Activity {
         evaluating = true;
         armEvaluationTimeout();
         String call = token == null ? "tick(" + cfg + ")" : "execute(" + cfg + "," + JSONObject.quote(token) + ")";
-        String expression = "(function(){try{" + (engineReady ? "" : script)
+        String expression = "(function(){try{" + (engineReady ? "" : basicScript + "\n" + script)
             + "\nif(!window.__autoPokeAndroid)return JSON.stringify({kind:'reinject'});return JSON.stringify(window.__autoPokeAndroid." + call + ");}catch(e){return JSON.stringify({kind:'error',message:'Page script failed. Stop and reload Facebook.'});}})()";
         web.evaluateJavascript(expression, raw -> {
             // Never apply callbacks from a replaced document, stopped loop, or hidden activity.
@@ -438,6 +455,7 @@ public final class MainActivity extends Activity {
                 JSONObject result = new JSONObject((String) decoded);
                 String kind = result.optString("kind");
                 clickPending = result.optBoolean("requestPending");
+                if (basicMode) updateBasicStatus(result.optString("basicState", "unknown"));
                 if ("reinject".equals(kind)) { engineReady = false; schedule(250); return; }
                 engineReady = true;
                 if (result.has("state")) {
@@ -467,6 +485,7 @@ public final class MainActivity extends Activity {
                 else if (!"loading".equals(kind)) browserNotice.setVisibility(View.GONE);
                 status.setText(result.optString("message", "Watching for Poke back…"));
                 count.setText(result.optInt("attempts") + " click attempts · " + result.optInt("detected") + " detected");
+                if ("basic-setup".equals(kind)) { loading = false; cancelLoadTimeout(); }
                 if ("blank".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("error".equals(kind)) { setRunning(false); status.setText(result.optString("message")); return; }
                 if ("stalled".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
@@ -541,7 +560,7 @@ public final class MainActivity extends Activity {
     }
     private void toggleLoop() {
         setRunning(!running);
-        if (running && failed) openPokes();
+        if (running && (failed || (basicMode && (web == null || !pokesUrl(web.getUrl()))))) openPokes();
     }
     private void setRunning(boolean value) {
         loopEpoch++;
@@ -555,12 +574,65 @@ public final class MainActivity extends Activity {
         if (toggle == null) return;
         toggle.setText(running ? "Stop loop" : "Start loop");
         toggle.setBackground(rounded(running ? Color.rgb(250, 185, 179) : MINT, 12));
-        if (!running) status.setText("Loop stopped. Tap Start to watch for poke backs.");
+        if (!running) status.setText(basicSetupOpen ? "Finish Facebook’s Basic mode setup, then tap Open Pokes and Start loop."
+            : "Loop stopped. Tap Start to watch for poke backs.");
+        if (!basicMode) updateBasicStatus("off");
         count.setText(loopState.optInt("attempts") + " click attempts · " + (adaptive ? "adaptive refresh" : "refresh " + refreshSeconds + "s"));
         if (running && active && keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
+    private void updateBasicStatus(String state) {
+        if (basicStatus == null) return;
+        if (!basicMode) { basicStatus.setText("Basic mode profile: off"); return; }
+        switch (state) {
+            case "offer": basicStatus.setText("Basic offer: tap Continue on Facebook"); break;
+            case "basic": basicStatus.setText("Basic mode banner detected"); break;
+            case "data": basicStatus.setText("Facebook shows Data mode"); break;
+            default: basicStatus.setText("Basic mode: not confirmed"); break;
+        }
+    }
+    private void scheduleCarrier(long delay) {
+        handler.removeCallbacks(carrierPoll);
+        if (active && basicMode && !failed && web != null && trusted(web.getUrl())) handler.postDelayed(carrierPoll, delay);
+    }
+    private void readCarrier() {
+        if (!active || !basicMode || failed || web == null || !trusted(web.getUrl())) return;
+        // The loop already returns this passive UI signal while it is running.
+        if (running) { scheduleCarrier(1500); return; }
+        if (carrierReading) return;
+        carrierReading = true;
+        final int generation = navigation, sequence = ++carrierSequence;
+        final WebView current = web;
+        String expression = "(function(){try{" + basicScript
+            + "\nreturn JSON.stringify(window.__autoPokeBasic.read());}catch(e){return JSON.stringify({state:'unknown'});}})()";
+        current.evaluateJavascript(expression, raw -> {
+            if (current != web || generation != navigation || sequence != carrierSequence) return;
+            carrierReading = false;
+            if (!active) return;
+            try {
+                Object decoded = new JSONTokener(raw).nextValue();
+                JSONObject result = decoded instanceof String ? new JSONObject((String) decoded) : new JSONObject();
+                updateBasicStatus(result.optString("state", "unknown"));
+            } catch (Exception ignored) { updateBasicStatus("unknown"); }
+            scheduleCarrier(1500);
+        });
+    }
+    private void showBasicSetup() {
+        new AlertDialog.Builder(this).setTitle("Facebook Basic mode / Basic mode plus")
+            .setMessage("Use your carrier’s mobile data with Wi-Fi off.\n\nOpen Facebook here and sign in. If Facebook offers Basic mode, tap its Continue button yourself. Then tap Open Pokes and Start loop.\n\nAvailability, quota and charges are controlled by Facebook and your carrier. A banner is not billing verification. AutoPoke cannot enroll your SIM or transfer Chrome’s sign-in.")
+            .setPositiveButton("Open Facebook setup", (d, w) -> {
+                setRunning(false); basicMode = true; desktop = false; basicSetupOpen = true;
+                prefs.edit().putBoolean("basicMode", true).putBoolean("desktop", false).apply();
+                mobileRecovery.reset(); recovery.reset(); browserRecovery.reset(); whiteFrames.reset();
+                if (web == null) createBrowser(); else applyUserAgent();
+                failed = false; recovering = false; repairingBrowser = false; pokesExpected = false;
+                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
+                renderControls(); updateBasicStatus("unknown");
+                web.loadUrl("https://www.facebook.com/");
+            }).setNegativeButton("Cancel", null).show();
+    }
     private void openPokes() {
+        basicSetupOpen = false;
         if (web == null) createBrowser();
         if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
         failed = false; recovering = false; repairingBrowser = false; pokesExpected = true; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
@@ -568,9 +640,7 @@ public final class MainActivity extends Activity {
         if (pokesAddress().equals(web.getUrl())) web.reload(); else web.loadUrl(pokesAddress());
     }
     private String pokesAddress() {
-        // Never fall back from the carrier free address to a potentially paid address.
-        // Main-host recovery keeps the mobile UA and the mobile layout selected.
-        return mobileRecovery.address(desktop, freeMode);
+        return mobileRecovery.address(desktop, basicMode);
     }
     private void applyUserAgent() {
         web.setLayerType(!desktop && mobileRecovery.useSoftware() ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_NONE, null);
@@ -592,10 +662,11 @@ public final class MainActivity extends Activity {
         EditText refresh = number(form, "Refresh delay after page is ready (1–300 seconds)", refreshSeconds);
         EditText gap = number(form, "Minimum time between clicks (5–300 seconds)", gapSeconds);
         CheckBox saver = new CheckBox(this); saver.setText("Data saver: block images, refresh at least every 15s"); saver.setChecked(dataSaver); form.addView(saver);
-        CheckBox free = new CheckBox(this); free.setText("Try carrier Free Facebook (access unverified)"); free.setChecked(freeMode); form.addView(free);
-        TextView freeInfo = text("Free access depends on your SIM/carrier. This app cannot provide free data. Turn off Data saver if login images are needed.", 12, MUTED); form.addView(freeInfo);
+        CheckBox free = new CheckBox(this); free.setText("Carrier Basic mode / Basic mode plus (mobile)"); free.setChecked(basicMode); form.addView(free);
+        TextView freeInfo = text("Use the Basic mode button to open Facebook’s own setup. Accept its Continue offer manually. A detected banner does not verify carrier billing. Data saver only reduces downloads.", 12, MUTED); form.addView(freeInfo);
         CheckBox awake = new CheckBox(this); awake.setText("Keep screen awake while running"); awake.setChecked(keepAwake); form.addView(awake);
-        CheckBox desktopBox = new CheckBox(this); desktopBox.setText("Desktop Facebook layout"); desktopBox.setChecked(desktop); form.addView(desktopBox);
+        CheckBox desktopBox = new CheckBox(this); desktopBox.setText("Desktop Facebook layout"); desktopBox.setChecked(desktop); desktopBox.setEnabled(!basicMode); form.addView(desktopBox);
+        free.setOnCheckedChangeListener((box, enabled) -> { desktopBox.setEnabled(!enabled); if (enabled) desktopBox.setChecked(false); });
         CheckBox adaptiveBox = new CheckBox(this); adaptiveBox.setText("Increase refresh delay when idle"); adaptiveBox.setChecked(adaptive); form.addView(adaptiveBox);
         TextView info = text("Only Poke back is clicked. A click is an attempt, not confirmation. The loop pauses while the app is hidden and resumes when you return. Facebook sign-in and cookies stay in this app's WebView.", 12, MUTED);
         info.setPadding(0, dp(8), 0, dp(12)); form.addView(info);
@@ -617,20 +688,23 @@ public final class MainActivity extends Activity {
                 int nextGap = Integer.parseInt(gap.getText().toString().trim());
                 if (nextRefresh < 1 || nextRefresh > 300) { refresh.setError("Enter 1 to 300"); return; }
                 if (nextGap < 5 || nextGap > 300) { gap.setError("Enter 5 to 300"); return; }
-                boolean layoutChanged = desktop != desktopBox.isChecked() || dataSaver != saver.isChecked() || freeMode != free.isChecked();
-                dataSaver = saver.isChecked(); freeMode = free.isChecked();
-                prefs.edit().putBoolean("dataSaver", dataSaver).putBoolean("freeMode", freeMode).apply();
+                boolean layoutChanged = desktop != desktopBox.isChecked() || dataSaver != saver.isChecked() || basicMode != free.isChecked();
+                dataSaver = saver.isChecked(); basicMode = free.isChecked();
+                prefs.edit().putBoolean("dataSaver", dataSaver).putBoolean("basicMode", basicMode).apply();
                 refreshSeconds = nextRefresh; gapSeconds = nextGap; keepAwake = awake.isChecked(); desktop = desktopBox.isChecked(); adaptive = adaptiveBox.isChecked();
                 prefs.edit().putInt("refresh", nextRefresh).putInt("gap", nextGap).putBoolean("keepAwake", keepAwake).putBoolean("desktop", desktop).putBoolean("adaptive", adaptive).apply();
                 renderControls(); dialog.dismiss();
-                if (layoutChanged) { mobileRecovery.reset(); recovery.reset(); browserRecovery.reset(); applyUserAgent(); openPokes(); } else schedule(100);
+                if (layoutChanged) {
+                    mobileRecovery.reset(); recovery.reset(); browserRecovery.reset(); carrierSequence++; carrierReading = false;
+                    updateBasicStatus("unknown"); applyUserAgent(); openPokes(); scheduleCarrier(250);
+                } else schedule(100);
             } catch (NumberFormatException error) { refresh.setError("Enter whole seconds in both fields"); }
         }));
         dialog.show();
     }
     @Override protected void onResume() {
         super.onResume(); active = true;
-        renderControls();
+        renderControls(); scheduleCarrier(250);
         if (recovering) { if (web != null) { web.onResume(); web.resumeTimers(); } updateRecovery(); return; }
         if (web != null) {
             web.onResume(); web.resumeTimers(); renderControls();
@@ -642,7 +716,7 @@ public final class MainActivity extends Activity {
         }
     }
     @Override protected void onPause() {
-        whiteFrames.reset();
+        whiteFrames.reset(); carrierSequence++; carrierReading = false; handler.removeCallbacks(carrierPoll);
         active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
         if (web != null) { web.onPause(); web.pauseTimers(); CookieManager.getInstance().flush(); }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();

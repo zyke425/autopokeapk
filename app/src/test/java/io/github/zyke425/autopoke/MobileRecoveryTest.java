@@ -18,12 +18,12 @@ public final class MobileRecoveryTest {
         assertFalse(recovery.useMainHost()); assertFalse(recovery.useSoftware());
         assertFalse(recovery.blank());
     }
-    @Test public void carrierFreeModeNeverFallsBackToTheStandardAddress() {
+    @Test public void basicSetupAndPokesKeepTheMainHostAcrossRecovery() {
         MobileRecovery recovery = new MobileRecovery();
         assertEquals("https://m.facebook.com/pokes", recovery.address(false, false));
         for (int i = 0; i < 3; i++) {
             recovery.blank();
-            assertEquals("https://free.facebook.com/pokes", recovery.address(false, true));
+            assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(false, true));
             assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(false, false));
         }
         recovery.reset();
