@@ -40,25 +40,36 @@
         return (a >>> 0).toString(36) + (b >>> 0).toString(36);
     }
     const withoutTime = text => text.replace(/\b\d+\s*(?:s|m|h|d|sec(?:ond)?s?|min(?:ute)?s?|hours?|days?|weeks?)\s*(?:ago)?\b/g, '').trim();
+    function plainRowName(text) {
+        if ((text.match(/\b\d[\d,]*\s+pokes?\b/g) || []).length !== 1
+            || /friends who poked you|friends you poked|suggested/.test(text)) return '';
+        const name = withoutTime(text).replace(/poke\s*back|\b\d[\d,]*\s+pokes?\b/g, '')
+            .replace(/\b(?:just now|now|yesterday|today|ago)\b/g, '')
+            .replace(/[\p{P}\p{S}]/gu, ' ').replace(/\s+/g, ' ').trim();
+        return /\p{L}/u.test(name) && name.length >= 2 && name.length <= 160 ? name : '';
+    }
     function person(button) {
-        let row = null, profile = null;
+        let row = null, profile = null, plainName = '';
         for (let el = button.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
             if (backs(el).length > 1) break;
             const link = Array.from(el.querySelectorAll('a[href]')).find(a => {
-                if (isBack(a) || !normalize(a.textContent)) return false;
+                if (isBack(a) || !visible(a) || !(normalize(a.textContent) || a.querySelector('img') || a.getAttribute('aria-label'))) return false;
                 try {
                     const url = new URL(a.getAttribute('href'), location.href);
                     return url.protocol === 'https:' && /(^|\.)facebook\.com$/i.test(url.hostname)
-                        && !/^\/(?:pokes|help|privacy|login|settings|friends)(?:[/.]|$)/i.test(url.pathname);
+                        && url.pathname !== '/' && !/^\/(?:pokes|help|privacy|login|settings|friends|notifications|menu|home|zero)(?:[/.]|$)/i.test(url.pathname);
                 } catch (_) { return false; }
             });
             if (link) { row = el; profile = link; break; }
             const text = normalize(el.innerText || el.textContent);
-            if (/poked you|times in a row/.test(text) && text.replace(/poke\s*back|poked you|times in a row|[\d,\s]/g, '')) { row = el; break; }
+            if (/poked you|times in a row/.test(text) && !/friends who poked you|friends you poked|suggested/.test(text)
+                && text.replace(/poke\s*back|poked you|times in a row|[\d,\s]/g, '')) { row = el; break; }
+            plainName = plainRowName(text);
+            if (plainName) { row = el; break; }
         }
         if (!row) return null;
         let text = normalize(row.innerText || row.textContent).replace(/poke\s*back/g, '').trim();
-        let identity = withoutTime(text).replace(/[\d,]+\s+(?:pokes?|times in a row)\b/g, '').trim();
+        let identity = plainName || withoutTime(text).replace(/[\d,]+\s+(?:pokes?|times in a row)\b/g, '').trim();
         if (profile) {
             const url = new URL(profile.getAttribute('href'), location.href);
             identity = url.pathname + (url.searchParams.has('id') ? '?id=' + url.searchParams.get('id') : '');
@@ -67,6 +78,16 @@
         // Relative timestamps do not represent a new poke.
         text = withoutTime(text);
         return { button, identity: hash(identity), key: hash(identity + '|' + (counter ? counter[0] : text)) };
+    }
+    function pageView(buttons) {
+        const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],span'))
+            .filter(el => visible(el) && !el.closest('a,button,[role="button"],article,[role="article"],[role="feed"]'));
+        if (headings.some(el => normalize(el.textContent) === 'notifications')) return 'notifications';
+        const heading = headings.some(el => normalize(el.textContent) === 'pokes');
+        const text = normalize(document.body && document.body.innerText);
+        const evidence = /friends you poked|friends who poked you|poked you|suggested pokes|no pokes|no new pokes|\d[\d,]*\s+pokes\b/.test(text)
+            || headings.some(el => normalize(el.textContent) === 'suggested');
+        return ((/^\/pokes(?:\.php)?\/?$/.test(location.pathname) || heading) && (buttons.length || evidence)) ? 'pokes' : 'other';
     }
     let state = null, pending = null, prepared = null, authorizedToken = null;
     let readySince = 0, stalledSince = 0, blankSince = 0;
@@ -181,7 +202,6 @@
         }
         const exactRoute = /(?:^|\/)pokes(?:\.php)?\/?$/.test(location.pathname);
         const expected = exactRoute || cfg.pokesExpected === true;
-        const bodyText = normalize(document.body && document.body.innerText);
         if (expected && !renderedContent()) {
             readySince = 0;
             if (pending && pending.inFlight) { blankSince = 0; return result('waiting', 'Waiting for the poke request to finish…'); }
@@ -197,13 +217,10 @@
         }
         blankSince = 0;
         const buttons = backs(document).filter(visible);
-        const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'));
-        const heading = headings.some(el => visible(el) && normalize(el.textContent) === 'pokes')
-            || Array.from(document.querySelectorAll('span')).some(el => visible(el) && normalize(el.textContent) === 'pokes');
-        const evidence = /friends you poked|friends who poked you|poked you|suggested pokes|no pokes|no new pokes|\d[\d,]*\s+pokes\b/.test(bodyText)
-            || headings.some(el => visible(el) && normalize(el.textContent) === 'suggested');
+        const view = pageView(buttons);
+        if (view === 'notifications') { stalledSince = 0; readySince = 0; return result('offpage', 'Open Pokes to continue; Notifications is not the Pokes page.', {pageView:view}); }
         // Path alone is insufficient: don't reload an unrendered shell forever.
-        if (!((exactRoute || (heading && evidence)) && (buttons.length || evidence))) {
+        if (view !== 'pokes') {
             readySince = 0;
             if (pending && pending.inFlight) return result('waiting', 'Waiting for Facebook’s request to finish…');
             if (expected) {
@@ -267,7 +284,17 @@
         }
         return result('watching', 'Watching for an eligible Poke back. Refresh in ' + Math.ceil((idleDelay - (now - readySince)) / 1000) + 's.', { detected: buttons.length });
     }
-    window.__autoPokeAndroid = { tick, execute(cfg, token) {
+    window.__autoPokeAndroid = { tick, diagnostics(now = Date.now()) {
+        const buttons = backs(document).filter(visible), items = buttons.map(person).filter(Boolean);
+        const enabled = items.filter(item => usable(item.button));
+        const guarded = enabled.filter(item => {
+            const record = state && state.records.find(record => record.key === item.key);
+            return record && (record.tries >= 2 || record.readyAt > now);
+        });
+        return {view:pageView(buttons), detected:buttons.length, identified:items.length,
+            enabled:enabled.length, eligible:enabled.length - guarded.length, guarded:guarded.length,
+            unidentified:buttons.length - items.length};
+    }, execute(cfg, token) {
         if (!prepared || prepared.token !== token) return { kind: 'waiting', message: 'The saved click is no longer available.', attempts: state ? state.attempts : 0 };
         authorizedToken = token;
         try { return tick(cfg); } finally { authorizedToken = null; }

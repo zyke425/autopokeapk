@@ -116,3 +116,22 @@ test('a client-only Pokes view retains the site link when its URL still says Hom
         assert.equal(f.deepLoads(), 0);
     } finally { await f.context.close(); }
 });
+test('Pokes can reopen from a rendered poke notification with no Pokes-labelled menu item', async () => {
+    const f = await fixture(bar + '<h1>Notifications</h1><div role="link" tabindex="0" onclick="document.body.innerHTML=window.pokesHtml"><strong>Alex and Rhea</strong> poked you. 4 minutes ago</div>');
+    try {
+        assert.equal((await f.open({clientOnly:true})).kind, 'clicked');
+        assert.equal((await f.open({awaiting:true, clientOnly:true})).kind, 'existing');
+        assert.equal(f.deepLoads(), 0); assert.equal(await f.page.evaluate(() => window.pokeClicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('feed mentions and external notification links cannot be used as Pokes entry controls', async () => {
+    for (const body of [
+        '<h1>Facebook</h1><button onclick="window.wrong=1">Alex poked you.</button>',
+        '<h1>Notifications</h1><article><button onclick="window.wrong=1">Alex poked you.</button></article>',
+        '<h1>Notifications</h1><a href="https://evil.example/pokes">Alex poked you.</a>'
+    ]) {
+        const f = await fixture(bar + body);
+        try { assert.equal((await f.open({clientOnly:true})).kind, 'missing'); assert.equal(await f.page.evaluate(() => window.wrong || 0), 0); }
+        finally { await f.context.close(); }
+    }
+});

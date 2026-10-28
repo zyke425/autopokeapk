@@ -28,6 +28,11 @@ test('a stale Pokes URL and navigation label do not turn a Home feed into the Po
     try { assert.equal((await f.inspect(start, {navigationView:true, pokesExpected:false})).pokes, false); }
     finally { await f.context.close(); }
 });
+test('Notifications is never acknowledged as Pokes despite a stale Pokes route and navigation badge', async () => {
+    const f = await fixture('<nav><a href="/pokes"><span>Pokes</span></a></nav><h1>Notifications</h1><p>Alex and Rhea poked you.</p>');
+    try { assert.equal((await f.inspect(start, {navigationView:true})).pokes, false); }
+    finally { await f.context.close(); }
+});
 
 test('stopped-loop inspection detects the reported blank mobile Pokes page without sending pokes', async () => {
     const f = await fixture('');

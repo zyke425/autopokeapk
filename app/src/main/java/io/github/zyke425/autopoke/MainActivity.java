@@ -87,6 +87,7 @@ public final class MainActivity extends Activity {
     private int uiRefreshCycle;
     private long nextUiRefreshAt;
     private String lastUiRefreshPhase = "idle";
+    private String lastUiReturnSource = "unrecorded";
     private int reportSequence;
     private String lastBasicState = "unknown";
     private JSONObject loopState = new JSONObject();
@@ -183,7 +184,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.10", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.11", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -560,6 +561,9 @@ public final class MainActivity extends Activity {
                     ensureVisualReady();
                 }
                 if ("refresh".equals(kind)) { refreshPokes(); return; }
+                if (basicMode && "offpage".equals(kind) && "notifications".equals(result.optString("pageView"))) {
+                    refreshPokes(); return;
+                }
                 if ("watching".equals(kind) || "waiting".equals(kind)) checkVisibleFrame();
                 else whiteFrames.reset();
             } catch (Exception error) {
@@ -808,6 +812,8 @@ public final class MainActivity extends Activity {
                 if (refreshing) {
                     String phase = result.optString("phase", "unknown");
                     lastUiRefreshPhase = phase.matches("start|back|entry|settling|done|unavailable") ? phase : "unknown";
+                    String source = result.optString("returnSource", "unrecorded");
+                    lastUiReturnSource = source.matches("notification|pokes-link|unrecorded") ? source : "unrecorded";
                 }
                 updateBasicStatus(result.optString("state", "unknown"));
                 rememberPokesLink(result.optString("pokesLink", ""));
@@ -854,11 +860,12 @@ public final class MainActivity extends Activity {
         String transport = network == null ? "none" : network.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
             : network.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi" : "other/VPN";
         String category = authenticationUrl(currentBrowserUrl()) ? "sign-in" : pokesUrl(currentBrowserUrl()) ? "Pokes" : "Home/other Facebook view";
-        final String prefix = "AutoPoke 1.1.10 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
+        final String prefix = "AutoPoke 1.1.11 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
             + "\nNetwork: " + transport + "\nPage category: " + category + "\nBasic banner signal: " + lastBasicState
             + "\nLoop running: " + running + "\nUI entry pending: " + pendingPokesEntry
             + "\nRefresh strategy: " + (basicMode ? "Facebook page controls" : "Pokes URL")
             + "\nUI refresh active: " + uiPokesRefresh + "\nUI refresh phase: " + lastUiRefreshPhase
+            + "\nRecorded Pokes entry: " + lastUiReturnSource
             + "\n" + loadDiagnostics.summary() + "\n";
         if (web == null) { putLoadReport(prefix + "DOM: browser unavailable"); return; }
         final int generation = navigation;
@@ -879,6 +886,15 @@ public final class MainActivity extends Activity {
                     safeCounts.put("documentState", state.matches("loading|interactive|complete") ? state : "unknown");
                     for (String key : new String[]{"htmlCharacters", "bodyElements", "textCharacters", "scriptElements", "frames", "navigationBodyBytes"})
                         safeCounts.put(key, Math.max(-1L, Math.min(100_000_000L, rawCounts.optLong(key, -1))));
+                    JSONObject rawScan = rawCounts.optJSONObject("pokeScan");
+                    if (rawScan != null) {
+                        JSONObject scan = new JSONObject();
+                        String view = rawScan.optString("view", "unknown");
+                        scan.put("view", view.matches("pokes|notifications|other") ? view : "unknown");
+                        for (String key : new String[]{"detected", "identified", "enabled", "eligible", "guarded", "unidentified"})
+                            scan.put(key, Math.max(0L, Math.min(100_000L, rawScan.optLong(key, 0))));
+                        safeCounts.put("pokeScan", scan);
+                    }
                     sample = "DOM counts: " + safeCounts;
                 }
             } catch (Exception ignored) { }

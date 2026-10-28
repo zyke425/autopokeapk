@@ -41,6 +41,74 @@ test('clicks Poke back and never suggested Poke', async () => {
         assert.equal(await f.page.locator('button').nth(1).isDisabled(), false);
     } finally { await f.context.close(); }
 });
+const basicRow = (name = 'Alex Sample', count = '643', time = '4m ago', action = 'Poke back') => '<div class="basic-person"><div><strong>'
+    + name + '</strong><div class="meta">' + time + ' · ' + count + ' pokes 🌟</div></div><button onclick="window.clicks=(window.clicks||0)+1;this.disabled=true">' + action + '</button></div>';
+test('the reported Basic layout identifies plain-name/count rows and clicks both incoming pokes', async () => {
+    const f = await fixture(pageHtml('<h2>Friends who poked you</h2>' + basicRow() + basicRow('Rhea Sample', '1,674')
+        + '<h2>Suggested</h2>' + basicRow('Ben Sample', '4', '2h ago', 'Poke')), 'https://m.facebook.com/');
+    try {
+        assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+        assert.equal((await f.tick(start + 7000)).kind, 'clicked');
+        assert.equal(await f.page.evaluate(() => clicks), 2);
+        assert.equal(await f.page.getByRole('button', {name:'Poke', exact:true}).isDisabled(), false);
+    } finally { await f.context.close(); }
+});
+test('plain Basic rows retain duplicate guards across reloads and relative timestamp changes', async () => {
+    const f = await fixture(pageHtml(basicRow()));
+    try {
+        const sent = await f.tick(); assert.equal(sent.kind, 'clicked');
+        await f.page.reload(); await f.page.evaluate(script);
+        await f.page.locator('.meta').evaluate(el => el.textContent = '5m ago · 643 pokes 🌟');
+        assert.equal((await f.tick(start + 15000, {state:sent.state})).kind, 'watching');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('an increased poke count makes the same plain-name Basic row eligible again', async () => {
+    const f = await fixture(pageHtml(basicRow()));
+    try {
+        const sent = await f.tick(); await f.page.reload(); await f.page.evaluate(script);
+        await f.page.locator('.meta').evaluate(el => el.textContent = 'Just now · 644 pokes 🌟');
+        assert.equal((await f.tick(start + 1000, {state:sent.state})).kind, 'waiting');
+        assert.equal((await f.tick(start + 7000, {state:sent.state})).kind, 'clicked');
+    } finally { await f.context.close(); }
+});
+test('image-only profile links provide a stable identity when the visible name changes', async () => {
+    const image = '<a href="/profile.php?id=7"><img width="24" height="24" alt="Profile"></a>';
+    const f = await fixture(pageHtml(basicRow().replace('<strong>', image + '<strong>')));
+    try {
+        const sent = await f.tick(); await f.page.reload(); await f.page.evaluate(script);
+        await f.page.locator('strong').evaluate(el => el.textContent = 'Changed Display Name');
+        assert.equal((await f.tick(start + 15000, {state:sent.state})).kind, 'watching');
+    } finally { await f.context.close(); }
+});
+test('a count and a section title cannot stand in for an unidentified person', async () => {
+    const f = await fixture(pageHtml('<h2>Friends who poked you</h2><div>643 pokes <button onclick="window.clicks=1">Poke back</button></div>'));
+    try {
+        assert.equal((await f.tick()).kind, 'watching');
+        const d = await f.page.evaluate(now => __autoPokeAndroid.diagnostics(now), start);
+        assert.equal(d.identified, 0); assert.equal(d.unidentified, 1);
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('Notifications is not treated as Pokes even with a stale Pokes URL and a Pokes navigation label', async () => {
+    const f = await fixture('<!doctype html><body><nav><a href="/pokes"><span>Pokes</span></a></nav><h1>Notifications</h1><p>Alex poked you.</p>' + basicRow() + '</body>');
+    try {
+        const r = await f.tick(); assert.equal(r.kind, 'offpage'); assert.equal(r.pageView, 'notifications');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('poke-scan diagnostics distinguish identified rows and guards without copying names or identities', async () => {
+    const f = await fixture(pageHtml(basicRow() + basicRow('Rhea Sample', '1,674')));
+    try {
+        const before = await f.page.evaluate(now => __autoPokeAndroid.diagnostics(now), start);
+        assert.deepEqual(before, {view:'pokes', detected:2, identified:2, enabled:2, eligible:2, guarded:0, unidentified:0});
+        const sent = await f.rawTick(); assert.equal(sent.kind, 'prepared');
+        const after = await f.page.evaluate(now => __autoPokeAndroid.diagnostics(now), start);
+        assert.equal(after.guarded, 1); assert.equal(after.eligible, 1);
+        assert.equal(JSON.stringify(after).includes('Sample'), false); assert.equal(JSON.stringify(after).includes('1674'), false);
+    } finally { await f.context.close(); }
+});
 test('Start is required and Stop prevents clicks and refreshes', async () => {
     const f = await fixture(pageHtml(row()));
     try {

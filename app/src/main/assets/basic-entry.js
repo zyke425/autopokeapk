@@ -32,19 +32,48 @@
                 && !Array.from(u.searchParams.keys()).some(k => /^(?:poke_target|poke|target_id|uid|action|send_poke|fb_dtsg|jazoest)$/i.test(k));
         } catch (_) { return false; }
     }
+    const pokesLabel = el => label(el).some(value => /^pokes(?:\s*\(?[\d,]+\)?)?$/.test(value));
+    function notificationView() {
+        return Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],span')).some(el => usable(el)
+            && !el.closest('a,button,[role="button"]') && normalize(el.textContent) === 'notifications');
+    }
+    function pokeNotification(el) {
+        return label(el).some(value => value.length < 350 && /\bpoked you\b/.test(value))
+            && (!el.hasAttribute('href') || el.getAttribute('href') === '#' || safePokesHref(el));
+    }
+    let candidateSource = '', returnSource = '';
+    function rememberEntry(source) { candidateSource = source; returnSource = ''; }
+    function confirmEntry() { if (candidateSource) { returnSource = candidateSource; candidateSource = ''; } }
+    // Remember a user-selected entry too. A generic Back action is not a refresh
+    // route unless this document observed the Pokes entry that it can reopen.
+    document.addEventListener('click', event => {
+        if (!event.isTrusted) return;
+        const el = event.composedPath().find(node => node.nodeType === 1
+            && node.matches('a,button,[role="link"],[role="button"],[tabindex="0"]'));
+        if (!usable(el)) return;
+        const health = window.__autoPokeHealth.read({browserExpected:true, navigationView:true});
+        if (health.pokes) {
+            if (!label(el).some(value => /^poke\s*back$/.test(value))) { candidateSource = ''; returnSource = ''; }
+        } else if (notificationView() && pokeNotification(el)) rememberEntry('notification');
+        else if (pokesLabel(el) && safePokesHref(el)) rememberEntry('pokes-link');
+    }, true);
     function open(cfg = {}) {
         if (location.protocol !== 'https:' || !/(^|\.)facebook\.com$/i.test(location.hostname)) return { kind: 'offpage' };
         const health = window.__autoPokeHealth.read({ now: cfg.now, browserExpected: true, pokesExpected: false, navigationView: cfg.clientOnly === true });
         if (health.kind === 'login' || health.kind === 'basic-setup' || health.kind === 'hidden'
             || health.kind === 'blank' || health.kind === 'rendering' || health.kind === 'loading') return health;
-        if (health.pokes) return { kind: 'existing' };
+        if (health.pokes) { confirmEntry(); return { kind: 'existing' }; }
         if (cfg.awaiting === true) return { kind: 'waiting' };
         const available = controls();
-        const poke = available.find(el => label(el).some(value => /^pokes(?:\s*\(?[\d,]+\)?)?$/.test(value)) && safePokesHref(el));
+        const direct = available.find(el => pokesLabel(el) && safePokesHref(el));
+        const notification = notificationView() ? Array.from(document.querySelectorAll('a,button,[role="link"],[role="button"],[tabindex="0"]'))
+            .find(el => usable(el) && pokeNotification(el)) : null;
+        const poke = direct || notification;
         if (poke) {
             // Keep the site's real navigation address even when its handler opens
             // a Pokes view without updating the document's Home URL.
-            const pokesLink = poke.hasAttribute('href') ? new URL(poke.getAttribute('href'), location.href).href : '';
+            const pokesLink = poke.hasAttribute('href') && safePokesHref(poke) ? new URL(poke.getAttribute('href'), location.href).href : '';
+            rememberEntry(poke === notification ? 'notification' : 'pokes-link');
             activate(poke, cfg.clientOnly); return { kind: 'clicked', pokesLink };
         }
         if (cfg.allowMenu === true) {
@@ -69,7 +98,8 @@
         const health = window.__autoPokeHealth.read({now, browserExpected:true, navigationView:true});
         if (!session || session.id !== cfg.cycle) session = {id:cfg.cycle, at:now, epoch:cfg.epoch, phase:'start', menu:false};
         if (session.epoch !== cfg.epoch) { session.epoch = cfg.epoch; session.at = now; }
-        const result = kind => ({kind, phase:session.phase, pokes:health.pokes === true});
+        if (health.pokes) confirmEntry();
+        const result = kind => ({kind, phase:session.phase, pokes:health.pokes === true, returnSource:returnSource || 'unrecorded'});
         if (['offpage','hidden','login','basic-setup'].includes(health.kind)) { session.at = now; return result(health.kind); }
         if (session.phase === 'done') return result('existing');
         if (session.phase === 'unavailable') return result('refresh-unavailable');
@@ -79,8 +109,8 @@
             session.heading = heading(); session.fingerprint = fingerprint();
             const available = controls().filter(el => el.getBoundingClientRect().top < 240);
             const reload = available.find(el => label(el).some(v => /^(?:refresh|reload)(?: pokes)?$/.test(v)) && safePokesHref(el));
-            const back = available.find(el => label(el).some(v => /^(?:(?:go )?back|[←‹❮])$/.test(v)));
-            const poke = available.find(el => label(el).some(v => /^pokes(?:\s*\(?[\d,]+\)?)?$/.test(v)) && safePokesHref(el));
+            const back = returnSource ? available.find(el => label(el).some(v => /^(?:(?:go )?back|[←‹❮])$/.test(v))) : null;
+            const poke = available.find(el => pokesLabel(el) && safePokesHref(el));
             const target = reload || back || poke;
             if (!target) { session.phase = 'unavailable'; return result('refresh-unavailable'); }
             session.phase = target === back ? 'back' : 'settling';

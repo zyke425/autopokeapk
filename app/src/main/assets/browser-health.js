@@ -53,6 +53,7 @@
             .filter(el => visible(el) && !el.closest('a,button,[role="button"]')
                 && (cfg.navigationView === true || !el.closest('nav,header')));
         const heading = headings.some(el => normalize(el.textContent) === 'pokes');
+        if (headings.some(el => normalize(el.textContent) === 'notifications')) return result('content', true, false);
         const evidence = /suggested pokes|no pokes|no new pokes|friends who poked you|friends you poked/.test(body)
             || (cfg.navigationView !== true && /poked you|times in a row/.test(body))
             || headings.some(el => normalize(el.textContent) === 'suggested');
@@ -75,7 +76,8 @@
             textCharacters: document.body ? document.body.innerText.length : 0,
             scriptElements: document.scripts.length,
             frames: document.querySelectorAll('iframe').length,
-            navigationBodyBytes: navigation && Number.isFinite(navigation.encodedBodySize) ? navigation.encodedBodySize : -1
+            navigationBodyBytes: navigation && Number.isFinite(navigation.encodedBodySize) ? navigation.encodedBodySize : -1,
+            pokeScan: window.__autoPokeAndroid && window.__autoPokeAndroid.diagnostics ? window.__autoPokeAndroid.diagnostics() : null
         };
     }
     window.__autoPokeHealth = { read, diagnostics };

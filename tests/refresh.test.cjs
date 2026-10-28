@@ -24,7 +24,9 @@ async function fixture(options = {}) {
     const page = await context.newPage(); await page.goto('https://m.facebook.com/');
     await page.evaluate(options => {
         window.entries = 0; window.clicks = 0; window.backs = 0;
-        window.homeHtml = '<h1>Facebook</h1><a href="/pokes?ref=menu&zero=carrier" onclick="event.preventDefault();window.showPokes()">Pokes</a>';
+        window.homeHtml = options.fromNotifications
+            ? '<h1>Notifications</h1><a href="/pokes?ref=menu&zero=carrier" onclick="event.preventDefault();window.showPokes()"><strong>Alex and Rhea</strong> poked you. 4 minutes ago</a><button onclick="window.wrong=1">We noticed a new login</button>'
+            : '<h1>Facebook</h1><a href="/pokes?ref=menu&zero=carrier" onclick="event.preventDefault();window.showPokes()">Pokes</a>';
         window.showHome = () => {
             window.backs++;
             if (options.noopBack) return;
@@ -36,13 +38,18 @@ async function fixture(options = {}) {
             if (!options.sameUrl) history.pushState({}, '', '/pokes?ref=menu&zero=carrier');
             const back = options.noBack ? '' : '<button aria-label="Back" onclick="window.showHome()">←</button>';
             const reload = options.reload ? '<button aria-label="Refresh Pokes" onclick="window.showPokes()">↻</button>' : '';
-            const row = options.idle ? '<p>No new pokes</p>' : '<div><a href="/alex">Alex</a> poked you ' + entries + ' times in a row <button onclick="window.clicks++;this.disabled=true">Poke back</button></div>';
+            const row = options.idle ? '<p>No new pokes</p>' : '<div>'
+                + (options.plainRows ? '<strong>Alex Sample</strong><div>4m ago · ' + entries + ' pokes 🌟</div>'
+                    : '<a href="/alex">Alex</a> poked you ' + entries + ' times in a row')
+                + ' <button onclick="window.clicks++;this.disabled=true">Poke back</button></div>';
             document.getElementById('app').innerHTML = back + reload + '<h2>Pokes</h2>' + row;
         };
         document.getElementById('app').innerHTML = homeHtml;
     }, options);
+    if (options.untracked) await page.evaluate(() => showPokes());
     await page.evaluate(scripts);
-    assert.equal((await page.evaluate(() => __autoPokeEntry.open())).kind, 'clicked');
+    if (options.manualEntry) await page.locator('#app a').click();
+    else if (!options.untracked) assert.equal((await page.evaluate(() => __autoPokeEntry.open())).kind, 'clicked');
     return {context, page, requests,
         refresh:(now, cycle = 1, epoch = 0) => page.evaluate(cfg => __autoPokeEntry.refresh(cfg), {now, cycle, epoch}),
         tick:cfg => page.evaluate(cfg => __autoPokeAndroid.tick({running:true, refreshMs:1000, gapMs:5000, adaptive:false, pokesExpected:true, ...cfg}), cfg),
@@ -193,5 +200,49 @@ test('disabled and feed refresh controls are ignored while the real Back control
         await f.page.locator('#app').evaluate(el => el.insertAdjacentHTML('afterbegin', '<div aria-disabled="true"><button onclick="window.wrong=1">Refresh</button></div><article><button onclick="window.wrong=1">Reload</button></article>'));
         await cycle(f, start, 1);
         assert.equal(await f.page.evaluate(() => window.wrong || 0), 0); assert.deepEqual(f.requests, ['/']);
+    } finally { await f.context.close(); }
+});
+test('an unrecorded Back control is never used as an automatic refresh route', async () => {
+    const f = await fixture({untracked:true, fromNotifications:true});
+    try {
+        const r = await f.refresh(start); assert.equal(r.kind, 'refresh-unavailable'); assert.equal(r.pokes, true);
+        assert.equal(r.returnSource, 'unrecorded'); assert.equal(await f.page.evaluate(() => backs), 0);
+        assert.equal(await f.page.locator('h2').innerText(), 'Pokes'); assert.deepEqual(f.requests, ['/']);
+    } finally { await f.context.close(); }
+});
+test('plain Basic rows keep clicking across recorded notification refreshes and return to Pokes each time', async () => {
+    const f = await fixture({fromNotifications:true, plainRows:true});
+    try {
+        for (let i = 0; i < 5; i++) {
+            const now = start + i * 10000;
+            const prepared = await f.tick({now}); assert.equal(prepared.kind, 'prepared');
+            assert.equal((await f.execute(now, prepared.token)).kind, 'clicked');
+            assert.equal((await f.tick({now:now + 1000})).kind, 'refresh');
+            assert.equal((await f.refresh(now + 1500, i + 1)).returnSource, 'notification');
+            assert.equal(await f.page.locator('h1').innerText(), 'Notifications');
+            await f.refresh(now + 2000, i + 1);
+            const ready = await f.refresh(now + 2750, i + 1); assert.equal(ready.kind, 'existing');
+            assert.equal(ready.pokes, true); assert.equal(await f.page.locator('h2').innerText(), 'Pokes');
+        }
+        assert.equal(await f.page.evaluate(() => entries), 6); assert.equal(await f.page.evaluate(() => clicks), 5);
+        assert.equal(await f.page.evaluate(() => window.wrong || 0), 0);
+        assert.deepEqual(f.requests, ['/']);
+    } finally { await f.context.close(); }
+});
+test('a real user click on a poke notification records the return entry without guessing a history destination', async () => {
+    const f = await fixture({fromNotifications:true, manualEntry:true});
+    try {
+        assert.equal((await f.refresh(start)).returnSource, 'notification');
+        await f.refresh(start + 500); assert.equal((await f.refresh(start + 1250)).kind, 'existing');
+        assert.deepEqual(f.requests, ['/']);
+    } finally { await f.context.close(); }
+});
+test('manual navigation away clears a previously recorded refresh return route', async () => {
+    const f = await fixture();
+    try {
+        await f.page.getByRole('button', {name:'Back', exact:true}).click();
+        await f.page.evaluate(() => showPokes());
+        const r = await f.refresh(start); assert.equal(r.kind, 'refresh-unavailable');
+        assert.equal(r.returnSource, 'unrecorded'); assert.equal(await f.page.evaluate(() => backs), 1);
     } finally { await f.context.close(); }
 });

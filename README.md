@@ -1,16 +1,28 @@
 # AutoPoke for Android
 
-Current APK: **1.1.10** (version code 12), Android 8.0 or newer.
+Current APK: **1.1.11** (version code 13), Android 8.0 or newer.
 
 A standalone Android app that opens Facebook in its own WebView, clicks rendered **Poke back** controls, and refreshes to find incoming pokes. Native Start/Stop and Settings controls stay above the page.
 
 **[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
 
-## Changes in 1.1.10
+## Changes in 1.1.11
+
+The reported Basic layout shows a person's name, relative time and poke count without a profile link or the old row wording. The previous parser detected its Poke back controls but could not identify the people. Its generic Back refresh could also land in Notifications with no Pokes-labelled link to return through.
+
+- Recognize plain-name/count rows such as **Alex Sample — 4m ago · 643 pokes**, and image-only profile links. Keep stable hashed identities, saved reservations and duplicate guards; a relative time change does not create a new incoming poke.
+- Record the rendered Pokes entry selected by the app or user. A generic **Back** control is no longer an automatic refresh fallback without a recorded entry route. If no suitable refresh route is available, preserve a visible Pokes view and keep scanning.
+- Reopen Pokes from a rendered **poked you** notification when that is the available entry. Ignore unrelated notifications, feed mentions and external links. A running loop that reaches Notifications uses client entry inspection to return to Pokes.
+- A visible Notifications heading cannot qualify as a ready Pokes view, even when the URL or a navigation badge still says Pokes.
+- Add numeric poke-scan counts to the load report: detected controls, identified rows, enabled/eligible rows, guards and unidentified rows. The report contains no names, row identities or page contents.
+
+133 offline browser tests and 32 JVM tests passed. New fixtures cover both pictured row formats, two successive incoming clicks, guard persistence and repeated Pokes → Notifications → Pokes cycles that keep clicking new incoming pokes. Android compilation, lint, packaged assets/classes and the update signing key are checked locally. Live carrier behavior still needs confirmation on the reporting phone.
+
+## Earlier changes in 1.1.10
 
 The reporting phone can open Pokes through Facebook's UI, but 1.1.9's full-document refresh still goes blank and recovery returns to Home with the Basic offer. Normal Basic-mode refresh now preserves the working document instead of issuing another Pokes GET.
 
-- Prefer Facebook's visible **Refresh/Reload Pokes** control. Otherwise use its visible **Back** control and rendered **Pokes** entry inside the same document. An available Pokes navigation control is another option. No private API, fabricated request or history replay is used.
+- Prefer Facebook's visible **Refresh/Reload Pokes** control. 1.1.10 also used a generic Back → Pokes fallback; 1.1.11 requires a recorded entry route and supports the real poke-notification return path. No private API, fabricated request or history replay is used.
 - Cancel plain-anchor default navigation during client refresh and block automatic main-document navigation through the native refresh guard. The normal loop and native reload button do not call `loadUrl` or `reload` for a working Basic-mode Pokes view.
 - Wait for a real view/content transition before resuming. Clicking an ineffective control is not counted as a successful refresh; slow navigation gets up to 30 seconds and controls are not clicked repeatedly.
 - If refresh controls are unavailable while Pokes remains visible, keep scanning that view and check the controls again after 30 seconds. Newly arriving Poke back controls remain eligible during that interval. If the site has left Pokes and provides no client entry, leave navigation to the user instead of falling back to a document reload.
@@ -98,8 +110,8 @@ Facebook and the carrier control eligibility, quota, available features and char
 ## Install and use
 
 1. Download the APK and open it on your Android phone. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
-2. Update directly from **1.1.1 through 1.1.9**; these builds use the same saved development signing key. Builds **1.0.0/1.1.0** require uninstalling first because their signing key was lost before 1.1.1. Uninstalling removes local sign-in and settings.
-3. Open the app and confirm the title says **AutoPoke 1.1.10**.
+2. Update directly from **1.1.1 through 1.1.10**; these builds use the same saved development signing key. Builds **1.0.0/1.1.0** require uninstalling first because their signing key was lost before 1.1.1. Uninstalling removes local sign-in and settings.
+3. Open the app and confirm the title says **AutoPoke 1.1.11**.
 4. Sign in to Facebook inside the app, tap **Open Pokes**, and tap **Start loop**. Keep the app open.
 5. Tap **Stop loop** to stop automatic poke clicks and normal loop refreshes. Foreground blank-page recovery remains active without sending pokes.
 
@@ -110,7 +122,7 @@ No Tampermonkey or accessibility service is needed. This app uses its own Facebo
 | Setting or behavior | Details |
 | --- | --- |
 | Poke back | Only rendered, enabled English **Poke back** controls on a recognized Pokes view are eligible. Suggested **Poke** controls are ignored. |
-| Refresh | Basic mode uses the current document's Refresh or Back → Pokes controls. It keeps scanning a visible Pokes view if those controls are unavailable and checks them again after 30 seconds. Data mode uses the Pokes URL. Home bootstrap is for initial entry and actual browser recovery. Base delay is 5 seconds on a new installation, editable from 1 to 300 seconds. Adaptive idle refresh increases up to the larger of 60 seconds or the base delay. Data saver imposes a 15-second minimum. Network/rendering time is additional. |
+| Refresh | Basic mode uses the current document's Refresh/Pokes controls. Back navigation requires a recorded Pokes entry route, including a poke notification that can reopen Pokes. It keeps scanning a visible Pokes view if those controls are unavailable and checks them again after 30 seconds. Data mode uses the Pokes URL. Home bootstrap is for initial entry and actual browser recovery. Base delay is 5 seconds on a new installation, editable from 1 to 300 seconds. Adaptive idle refresh increases up to the larger of 60 seconds or the base delay. Data saver imposes a 15-second minimum. Network/rendering time is additional. |
 | Click spacing | Default minimum 7 seconds, editable from 5 to 300 seconds. |
 | After a click | Wait for the current poke's observed request to settle and for the row to change. An unchanged row gets 12 seconds before refresh; an unresolved request gets at most 90 seconds. Neither response errors nor unrelated requests add a cooldown. |
 | Duplicate guard | Save a reservation before clicking. The unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. A new poke count creates a new signature. Guards and attempts survive reloads/restarts. |
@@ -148,7 +160,7 @@ npm test
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-The 119 browser tests use intercepted offline fixtures: no Facebook login or live pokes. They cover blank document reloads versus repeated client-only refresh, controls that are missing or ineffective, slow navigation, continued incoming-poke scanning, read-only stopped-loop checks, host/link preservation, manual setup exclusions, clicking/refreshing across repeated failed responses, old-state migration, unrelated/hung requests, duplicate guards, mobile loading and blank-page states, sign-in exclusions, adaptive timing, carrier-banner detection, manual opt-in, false-label exclusion, and continuation after setup. Thirty-two JVM tests cover Pokes navigation targets, recovery budgets, mobile fallback/compatibility, redirect-proof readiness deadlines, and white-frame classification/deadlines. Device-specific rendering and a live signed-in Facebook session still need testing on the reporting phone.
+The 133 browser tests use intercepted offline fixtures: no Facebook login or live pokes. They cover plain Basic rows, recorded notification return paths, wrong-view rejection, scan diagnostics, blank document reloads versus repeated client-only refresh, missing/ineffective controls, slow navigation, continued incoming-poke scanning, stopped-loop checks, host/link preservation, manual setup exclusions, failed/hung requests, duplicate guards, loading/blank states, sign-in exclusions, adaptive timing and carrier UI recognition. Thirty-two JVM tests cover navigation targets, recovery budgets, mobile fallback/compatibility, readiness deadlines and white-frame checks. Device-specific rendering and a live signed-in Facebook session still need testing on the reporting phone.
 
 The checked-in APK is built and signature-verified locally. GitHub Actions previously could not start because GitHub reported an account billing lock; the checked-in download is available independently of Actions. CI runs browser tests, Android compilation, unit tests and lint when runners are available. A passing `main` build publishes a development APK prerelease.
 
@@ -158,9 +170,9 @@ The private local signing backup is excluded from Git. CI uses its own debug key
 
 - `app/src/main/java/io/github/zyke425/autopoke/MainActivity.java`: native UI, WebView, lifecycle, settings, persistence and recovery integration.
 - `app/src/main/assets/autopoke.js`: visible-control detector and poke-back state machine.
-- `app/src/main/assets/basic-entry.js`: client-side Pokes/Menu entry and bounded Refresh/Back → Pokes updates with no consent/purchase actions.
+- `app/src/main/assets/basic-entry.js`: Pokes/Menu/notification entry and bounded refresh with a recorded return route, without consent/purchase actions.
 - `tests/entry.test.cjs`: deep-link versus client-route reproduction and entry checks.
-- `tests/refresh.test.cjs`: hard-reload failure reproduction, repeated client-only refreshes, missing/ineffective controls and continued scanning.
+- `tests/refresh.test.cjs`: hard-reload failure reproduction, notification-return cycles, unrecorded-Back exclusions, missing controls and continued scanning.
 - `app/src/main/assets/browser-health.js`: read-only page health checks independent of automation.
 - `tests/health.test.cjs`: stopped-loop inspection and navigation fixtures.
 - `app/src/main/assets/basic-mode.js`: read-only inspection of Facebook carrier banners/offers; no opt-in or purchase actions.
