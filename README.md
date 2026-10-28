@@ -1,12 +1,22 @@
 # AutoPoke for Android
 
-Current APK: **1.1.1** (version code 3).
+Current APK: **1.1.2** (version code 4).
 
 A standalone Android version of the supplied **Facebook Autopoke GUI 2.12** userscript. Opens Facebook in an in-app WebView and keeps the controls in Android's own UI, above the page.
 
 **[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
 
 The checked-in APK was compiled and signature-verified locally. Android lint passed with no errors and the offline browser checks passed. GitHub Actions could not start its jobs because GitHub reported that the account is locked due to a billing issue. The APK above is available independently of Actions; automatic prereleases require a working runner.
+
+## Changes in 1.1.2
+
+- Narrow restriction detection: a generic **Try again later** message or a casual mention in a heading/dialog no longer permanently pauses poking.
+- Attribute observed request errors using the available friendly operation name, a poke-specific error path, or an unlabelled request synchronously emitted by the app's click. Unrelated and unattributed request errors use temporary backoff instead of claiming a confirmed poke restriction. No requests are constructed or replayed.
+- Record and display a pause reason/source. Genuine poke-request restrictions, explicit Facebook block notices, and main-page HTTP 429 responses remain held until manual review. Old pauses with no recorded cause stay labelled as an earlier pause; they are not silently cleared.
+- Keep one retry deadline during a cooldown so repeated background errors cannot extend it forever, and let an in-flight poke finish before processing unrelated failures.
+- Preserve a page-level restriction if an older asynchronous script result arrives after it.
+
+This APK uses the same signing certificate as 1.1.1 and can update it in place. The supplied screenshot shows the older **AutoPoke 1.1** header; installs from 1.0.0/1.1.0 still require uninstalling first because the signing key changed in 1.1.1.
 
 ## Changes in 1.1.1
 
@@ -48,7 +58,7 @@ No Tampermonkey or accessibility service is needed. This app uses its own sign-i
 | After a click | Waits at least the refresh delay and for observed Facebook requests to finish. Gives an unchanged row 12 seconds before refreshing once requests settle. |
 | Click spacing | Default minimum **7 seconds**, editable from 5 to 300 seconds. No human-behavior disguise or rate-limit bypass. |
 | Duplicate guard | Android durably saves a reservation before clicking. Same unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. An interrupted reservation can defer a row even if its click was never sent. A new poke count is a new signature. Guards and attempts survive reloads and restarts. |
-| Restriction | A visible Facebook restriction, GraphQL rate-limit error, or HTTP 429 stops the loop. Check Facebook manually before using **Review pause**. |
+| Restriction | An explicit Facebook block notice, an attributable poke-request restriction, or a main-page HTTP 429 holds the loop. The recorded reason appears on screen and in **Review pause**. Generic retry messages do not create a hold; unrelated/unattributed request errors use temporary backoff. |
 | Temporary failure | Observed request errors back off for 30 seconds, increasing to 5 minutes after repeated failures. Pokes-page load/server errors use bounded retries. A 45-second loading/rendering watchdog starts recovery; an unknown poke result after 90 seconds pauses for manual review. |
 | Blank / crashed browser | A completed empty or invisible document gets 10 seconds to render, followed by a 1-second reload delay. Repeated failures recreate the browser after 3 and 10 seconds. A crashed or unresponsive browser skips directly to replacement. Recovery keeps cookies, native state, and the ON setting; repeated failures eventually pause. |
 | Login / other routes | No automatic clicks or refreshes on login, checkpoint, email, password, or verification-code entry pages. An empty root redirect from an explicitly opened Pokes page can be repaired. Tap **Open Pokes** after finishing sign-in. |
@@ -62,7 +72,7 @@ Click counts measure **attempts**, not Facebook-confirmed successful pokes. The 
 
 - Requests **Internet** and **network-state access** permissions. Network state is used to wait while offline. No accessibility access, overlays, notification access, contacts, or background service.
 - Facebook receives your sign-in through its HTTPS page. Cookies and website storage remain in the app's WebView sandbox. The app does not collect or log passwords, cookies, tokens, or page contents.
-- Local preferences hold settings, attempt totals, restriction status, and hashed row signatures. Android app backups are disabled.
+- Local preferences hold settings, attempt totals, restriction status/reason/source, and hashed row signatures. Request scoping reads only the friendly operation-name field; raw request/response data and tokens are not stored. Android app backups are disabled.
 - No analytics or developer server. Only HTTPS Facebook pages can navigate inside the WebView. Other HTTPS links require a user gesture and a browser-opening confirmation. File/content access and mixed HTTP content are disabled; TLS certificate errors are cancelled.
 - There is no JavaScript-to-native interface. Native code polls a bounded JSON result from the top-level page.
 - Use **Settings → Sign out / clear Facebook data** to stop the loop and remove the app's Facebook data.
@@ -85,7 +95,7 @@ npx playwright install chromium
 npm test
 ```
 
-38 browser tests intercept every navigation with offline fixture HTML. They do not contact Facebook or send pokes. They cover mobile routes, reload persistence, new poke counts, duplicate retries, suggested-button exclusion, disabled/hidden controls, login and restriction pauses, request recovery, timing, interrupted reservations, adaptive idle delays, blank pages, invisible roots, and late rendering. Eight JVM unit tests check page recovery, blank-browser escalation, stable recovery, and retry budgets. The Android fix has not been verified on the reporting phone or a live signed-in Facebook session.
+54 browser tests intercept every navigation with offline fixture HTML. They do not contact Facebook or send pokes. They cover mobile routes, reload persistence, duplicate guards, suggested-button exclusion, login and restriction pauses, timing, idle backoff, blank pages, false-positive notices, request attribution for fetch/XHR, pause reasons, repeated errors during cooldown, and concurrent poke/background requests. Eight JVM unit tests check page recovery, blank-browser escalation, stable recovery, and retry budgets. The Android fix has not been verified on the reporting phone or a live signed-in Facebook session.
 
 GitHub Actions runs browser checks and Android compile/lint. A passing push to `main` publishes a debug-signed APK as a development prerelease, with an artifact copy kept for 30 days. Different machines/runners have different debug certificates: uninstall the previous development APK first if an update reports a signature conflict. Production signing and automatic app updates are not configured.
 

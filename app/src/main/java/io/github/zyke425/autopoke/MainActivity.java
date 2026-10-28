@@ -140,7 +140,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.1", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.2", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -258,7 +258,10 @@ public final class MainActivity extends Activity {
             }
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse response) {
                 if (view != web || !req.isForMainFrame()) return;
-                if (response.getStatusCode() == 429) { holdRestriction(); pageError("Facebook limited requests. Loop paused."); }
+                if (response.getStatusCode() == 429) {
+                    holdRestriction("Facebook limited page loads (HTTP 429).", "page-response");
+                    pageError("Facebook limited page loads (HTTP 429). Loop paused.");
+                }
                 else if (response.getStatusCode() >= 500 && pokesUrl(req.getUrl().toString())) queueRecovery("Facebook returned a temporary server error.");
                 else pageError("Facebook returned an error. Check the page, then tap ↻.");
             }
@@ -423,7 +426,13 @@ public final class MainActivity extends Activity {
                 if ("reinject".equals(kind)) { engineReady = false; schedule(250); return; }
                 engineReady = true;
                 if (result.has("state")) {
-                    loopState = result.getJSONObject("state");
+                    JSONObject incoming = result.getJSONObject("state");
+                    // A late script callback must not clear a page-level HTTP 429 pause.
+                    if (loopState.optBoolean("held") && !incoming.optBoolean("held")) {
+                        incoming.put("held", true); incoming.put("holdReason", restrictionReason());
+                        incoming.put("holdSource", loopState.optString("holdSource", "legacy"));
+                    }
+                    loopState = incoming;
                     if (!"prepared".equals(kind)) persistState();
                 }
                 if ("prepared".equals(kind)) {
@@ -449,7 +458,10 @@ public final class MainActivity extends Activity {
                 else if (!"loading".equals(kind)) browserNotice.setVisibility(View.GONE);
                 status.setText(result.optString("message", "Watching for Poke back…"));
                 count.setText(result.optInt("attempts") + " click attempts · " + result.optInt("detected") + " detected");
-                if ("restricted".equals(kind)) { holdRestriction(); return; }
+                if ("restricted".equals(kind)) {
+                    holdRestriction(result.optString("restrictionReason", "Earlier pause; its cause was not recorded."),
+                        result.optString("restrictionSource", "legacy")); return;
+                }
                 if ("blank".equals(kind)) { queueBrowserRecovery(result.optString("message"), false); return; }
                 if ("error".equals(kind)) { setRunning(false); status.setText(result.optString("message")); return; }
                 if ("stalled".equals(kind)) { queueRecovery(result.optString("message")); return; }
@@ -474,10 +486,14 @@ public final class MainActivity extends Activity {
             schedule(500);
         });
     }
-    private void holdRestriction() {
-        try { loopState.put("held", true); } catch (Exception ignored) { }
+    private String restrictionReason() {
+        return loopState.optString("holdReason", "Earlier pause; the previous version did not record its cause.");
+    }
+    private void holdRestriction(String reason, String source) {
+        try { loopState.put("held", true); loopState.put("holdReason", reason); loopState.put("holdSource", source); }
+        catch (Exception ignored) { }
         persistState();
-        setRunning(false); status.setText("Facebook reported a restriction. Check the page before restarting.");
+        setRunning(false); status.setText("Paused: " + restrictionReason());
     }
     private void persistState() {
         // Serialize state writes with the pre-click journal so a late write cannot clear a restriction.
@@ -490,10 +506,11 @@ public final class MainActivity extends Activity {
     }
     private void toggleLoop() {
         if (loopState.optBoolean("held")) {
-            new AlertDialog.Builder(this).setTitle("Facebook paused the loop")
-                .setMessage("Wait until a manual poke works on Facebook. Resume only after checking the page.")
+            new AlertDialog.Builder(this).setTitle("Review AutoPoke pause")
+                .setMessage("Pause reason: " + restrictionReason() + "\n\nCheck Facebook manually. Resume after a manual poke works.")
                 .setPositiveButton("Manual poke works — resume", (d, w) -> {
-                    try { loopState.put("held", false); } catch (Exception ignored) { }
+                    try { loopState.put("held", false); loopState.remove("holdReason"); loopState.remove("holdSource"); }
+                    catch (Exception ignored) { }
                     persistState();
                     // Reload removes the old document's held flag; keep duplicate guards.
                     setRunning(true); openPokes();
@@ -515,7 +532,7 @@ public final class MainActivity extends Activity {
         if (toggle == null) return;
         toggle.setText(loopState.optBoolean("held") ? "Review pause" : running ? "Stop loop" : "Start loop");
         toggle.setBackground(rounded(running ? Color.rgb(250, 185, 179) : MINT, 12));
-        if (!running) status.setText(loopState.optBoolean("held") ? "Facebook restriction. Check manually before resuming." : "Loop stopped. Tap Start to watch for poke backs.");
+        if (!running) status.setText(loopState.optBoolean("held") ? "Paused: " + restrictionReason() : "Loop stopped. Tap Start to watch for poke backs.");
         count.setText(loopState.optInt("attempts") + " click attempts · " + (adaptive ? "adaptive refresh" : "refresh " + refreshSeconds + "s"));
         if (running && active && keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

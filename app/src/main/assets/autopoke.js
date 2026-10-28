@@ -67,21 +67,56 @@
     }
     let state = null, pending = null, prepared = null, authorizedToken = null;
     let readySince = 0, stalledSince = 0, healthySince = 0, blankSince = 0;
-    let dirty = false, networkRestricted = false, networkError = false, networkInFlight = 0;
-    function readErrors(value) {
+    let dirty = false, networkRestricted = null, networkError = false, networkInFlight = 0, dispatchingPoke = false;
+    const restrictionText = /rate limit(?: exceeded)?|temporarily blocked|going too fast|we limit how often/i;
+    const restrictionTitle = /^(?:(?:you(?:(?:'|’)re| are| have been)\s+)?temporarily blocked|rate limit exceeded)[.!]?$/i;
+    function restrictionNotice(el) {
+        if (!visible(el)) return false;
+        const text = normalize(el.innerText || el.textContent);
+        if (restrictionTitle.test(text)) return true;
+        if (!el.matches('[role="alert"],[role="dialog"]')) return false;
+        return /we limit how often|rate limit exceeded|you(?:(?:'|’)re| are| have been)\s+temporarily blocked|you(?:(?:'|’)re| are)\s+going too fast|misusing this feature.{0,100}going too fast/i.test(text);
+    }
+    function requestScope(body) {
+        // Inspect only the friendly operation name; never retain/replay the body.
+        let name = '';
+        try {
+            if (body && typeof body.get === 'function') name = body.get('fb_api_req_friendly_name') || '';
+            else if (typeof body === 'string') {
+                if (body.trim().startsWith('{')) name = JSON.parse(body).fb_api_req_friendly_name || '';
+                else name = new URLSearchParams(body).get('fb_api_req_friendly_name') || '';
+            }
+        } catch (_) { }
+        if (typeof name === 'string' && name) return /poke/i.test(name) && /mutation/i.test(name) ? 'poke' : 'other';
+        // A request made synchronously by this exact button click is attributable.
+        return dispatchingPoke ? 'poke' : 'unknown';
+    }
+    function httpResult(status, scope) {
+        if (status < 200 || status >= 300) networkError = true;
+        if (status === 429 && scope === 'poke') networkRestricted = {
+            reason: 'Facebook limited a poke request (HTTP 429).', source: 'poke-request'
+        };
+    }
+    function readErrors(value, scope) {
         if (!value || typeof value !== 'object') return;
-        if (Array.isArray(value)) { value.forEach(readErrors); return; }
+        if (Array.isArray(value)) { value.forEach(item => readErrors(item, scope)); return; }
         if (Array.isArray(value.errors) && value.errors.length) {
             networkError = true;
-            if (value.errors.some(e => e && (Number(e.code) === 1675004 || /rate limit|temporarily blocked|we limit how often/i.test(e.message || '')))) networkRestricted = true;
+            const error = value.errors.find(e => e && (Number(e.code) === 1675004 || restrictionText.test(e.message || ''))
+                && (scope === 'poke' || (scope === 'unknown' && Array.isArray(e.path) && e.path.some(part => typeof part === 'string'
+                    && /^(?:poke|poke_back|send_poke|sendPoke|pokeBack|pokeMutation)$/i.test(part)))));
+            if (error) {
+                const code = Number(error.code);
+                networkRestricted = { reason: 'Facebook rejected a poke request' + (Number.isSafeInteger(code) && code > 0 ? ' (error ' + code + ')' : '') + '.', source: 'poke-request' };
+            }
         }
-        if (value.payload) readErrors(value.payload);
+        if (value.payload) readErrors(value.payload, scope);
     }
-    function inspect(text) {
+    function inspect(text, scope) {
         if (typeof text !== 'string' || text.length > 1000000) return;
         text = text.replace(/^\s*for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
-        try { readErrors(JSON.parse(text)); } catch (_) {
-            for (const line of text.split('\n')) { try { readErrors(JSON.parse(line)); } catch (_) {} }
+        try { readErrors(JSON.parse(text), scope); } catch (_) {
+            for (const line of text.split('\n')) { try { readErrors(JSON.parse(line), scope); } catch (_) {} }
         }
     }
     function graphql(value) {
@@ -95,15 +130,16 @@
         const original = window.fetch;
         window.fetch = function (...args) {
             const track = graphql(args[0] && args[0].url || args[0]);
+            const scope = track ? requestScope(args[1] && args[1].body) : 'other';
             if (track) networkInFlight++;
             let request;
             try { request = original.apply(this, args); }
             catch (error) { if (track) { networkInFlight--; networkError = true; } throw error; }
             return request.then(response => {
                 if (track) {
-                    if (!response.ok) { networkError = true; if (response.status === 429) networkRestricted = true; }
+                    httpResult(response.status, scope);
                     try {
-                        response.clone().text().then(inspect, () => { networkError = true; })
+                        response.clone().text().then(text => inspect(text, scope), () => { networkError = true; })
                             .finally(() => { networkInFlight--; });
                     } catch (_) { networkInFlight--; networkError = true; }
                 }
@@ -117,16 +153,16 @@
         proto.open = function (method, url, ...rest) { urls.set(this, url); return open.call(this, method, url, ...rest); };
         proto.send = function (...args) {
             const track = graphql(urls.get(this));
+            const scope = track ? requestScope(args[0]) : 'other';
             let settled = false;
             const finish = () => { if (track && !settled) { settled = true; networkInFlight--; } };
             if (track) {
                 networkInFlight++;
                 this.addEventListener('loadend', () => {
-                if (this.status < 200 || this.status >= 300) networkError = true;
-                if (this.status === 429) networkRestricted = true;
+                httpResult(this.status, scope);
                 try {
-                    if (this.responseType === 'json') readErrors(this.response);
-                    else if (!this.responseType || this.responseType === 'text') inspect(this.responseText);
+                    if (this.responseType === 'json') readErrors(this.response, scope);
+                    else if (!this.responseType || this.responseType === 'text') inspect(this.responseText, scope);
                 } catch (_) { networkError = true; }
                 finish();
                 }, { once: true });
@@ -141,6 +177,8 @@
             const saved = cfg.state || {};
             state = { attempts: Math.max(0, Number(saved.attempts) || 0), nextAt: Number(saved.nextAt) || 0,
                 held: saved.held === true,
+                holdReason: typeof saved.holdReason === 'string' ? saved.holdReason.slice(0, 180) : 'Earlier pause; the previous version did not record its cause.',
+                holdSource: ['poke-request', 'facebook-notice', 'page-response'].includes(saved.holdSource) ? saved.holdSource : 'legacy',
                 idleRounds: Math.max(0, Math.min(6, Number(saved.idleRounds) || 0)),
                 failures: Math.max(0, Math.min(5, Number(saved.failures) || 0)), retryAt: Number(saved.retryAt) || 0,
                 records: Array.isArray(saved.records) ? saved.records.filter(r => r && typeof r.key === 'string').slice(-300) : [] };
@@ -154,12 +192,14 @@
         };
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
         if (!cfg.running || document.hidden) { readySince = 0; stalledSince = 0; blankSince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
-        if (state.held) return result('restricted', 'Facebook reported a restriction. Check it manually before resuming.');
-        const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"],h1,h2')).find(el => visible(el)
-            && /rate limit exceeded|temporarily blocked|try again later|going too fast|we limit how often/i.test(el.textContent || ''));
+        const restricted = () => result('restricted', 'Paused: ' + state.holdReason, { restrictionReason: state.holdReason, restrictionSource: state.holdSource });
+        if (state.held) return restricted();
+        const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"],h1,h2')).find(restrictionNotice);
         if (networkRestricted || warning) {
             state.held = true; dirty = true; pending = null; prepared = null;
-            return result('restricted', 'Facebook reported a restriction. Auto-poking and refresh are paused.');
+            state.holdReason = networkRestricted ? networkRestricted.reason : 'Facebook displayed an explicit block or rate-limit notice.';
+            state.holdSource = networkRestricted ? networkRestricted.source : 'facebook-notice';
+            return restricted();
         }
         if (/^\/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.]|$)/i.test(location.pathname)
             || Array.from(document.querySelectorAll('input[type="password"],input[name="email"],input[autocomplete="one-time-code"],iframe[src*="captcha"]')).some(visible)) {
@@ -170,12 +210,15 @@
             pending = null; prepared = null;
             return result('error', 'The poke result is still unknown after 90s. Loop paused; check Facebook manually.');
         }
-        if (networkError) {
+        if (networkError && pending && networkInFlight) return result('waiting', 'Waiting for the current poke request before retrying…');
+        if (networkError && !state.retryAt) {
             pending = null; prepared = null; networkError = false; healthySince = 0;
             state.failures = Math.min(5, state.failures + 1);
             state.retryAt = now + Math.min(300000, 30000 * Math.pow(2, state.failures - 1));
             readySince = 0; dirty = true;
         }
+        // Repeated background failures must not push the same retry deadline forward forever.
+        networkError = false;
         if (now < state.retryAt) return result('waiting', 'A Facebook request failed. Retrying in ' + Math.ceil((state.retryAt - now) / 1000) + 's.');
         if (state.retryAt) { state.retryAt = 0; dirty = true; return result('refresh', 'Reloading after the temporary error.'); }
         if (document.readyState !== 'complete' || !document.body) { readySince = 0; return result('loading', 'Waiting for Facebook to finish loading…'); }
@@ -225,8 +268,9 @@
             pending = { key: action.key, sentAt: now };
             state.nextAt = Math.max(state.nextAt, now + gapMs);
             state.attempts++; dirty = true; networkError = false;
-            try { action.button.click(); }
+            try { dispatchingPoke = true; action.button.click(); }
             catch (_) { pending = null; return result('error', 'The control could not be clicked. Stop and check Facebook.'); }
+            finally { dispatchingPoke = false; }
             return result('clicked', 'Poke-back click attempted.', { detected: buttons.length });
         }
         if (pending) {

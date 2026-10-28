@@ -135,7 +135,10 @@ test('GraphQL rate-limit errors pause without replaying requests', async () => {
             };
         });
         await f.page.evaluate(script);
-        await f.page.evaluate(async () => { await fetch('/api/graphql/'); await new Promise(r => setTimeout(r, 10)); });
+        await f.page.evaluate(async () => {
+            await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=PokeMutation' });
+            await new Promise(r => setTimeout(r, 10));
+        });
         assert.equal((await f.tick()).kind, 'restricted');
         assert.equal(await f.page.evaluate(() => requests), 1);
     } finally { await f.context.close(); }
@@ -402,5 +405,180 @@ test('Stop resets the blank-page grace period on resume', async () => {
         await f.tick(); await f.tick(start + 5000, { running: false });
         assert.equal((await f.tick(start + 60000)).kind, 'rendering');
         assert.equal((await f.tick(start + 70000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});
+
+async function observedError(operation, status = 200, error = { code: 1675004, message: 'Rate limit exceeded' }) {
+    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+    await f.page.reload();
+    await f.page.evaluate(({status, error}) => {
+        window.fetch = async () => new Response(JSON.stringify(error ? { errors: [error] } : {}), { status });
+    }, {status, error});
+    await f.page.evaluate(script);
+    await f.page.evaluate(async operation => {
+        const body = operation ? 'fb_api_req_friendly_name=' + encodeURIComponent(operation) : '';
+        await fetch('/api/graphql/', { method: 'POST', body });
+        await new Promise(resolve => setTimeout(resolve, 15));
+    }, operation);
+    return f;
+}
+test('a generic try-again-later sidebar notice does not hold the loop', async () => {
+    const f = await fixture(pageHtml(row('Rheane', 757, 'Poked').replace('<button ', '<button disabled ')
+        + '<div role="alert">Could not load the sidebar. Try again later.</div>'));
+    try {
+        assert.equal((await f.tick()).kind, 'watching');
+        await f.page.locator('article button').evaluate(el => { el.disabled = false; el.textContent = 'Poke back'; });
+        assert.equal((await f.tick(start + 7000)).kind, 'clicked');
+    } finally { await f.context.close(); }
+});
+test('casual mentions in headings and dialogs are not treated as block notices', async () => {
+    for (const notice of ['<h2>Why this image was temporarily blocked</h2>', '<div role="dialog">The animation is going too fast. Try again later.</div>']) {
+        const f = await fixture(pageHtml('<h2>Suggested</h2>' + notice));
+        try { assert.equal((await f.tick()).kind, 'watching'); } finally { await f.context.close(); }
+    }
+});
+test('background chat rate errors cause temporary backoff instead of a held poke restriction', async () => {
+    const f = await observedError('ChatSidebarQuery');
+    try {
+        const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false);
+        assert.equal((await f.tick(start + 30000)).kind, 'refresh');
+    } finally { await f.context.close(); }
+});
+test('unattributed GraphQL rate errors do not claim a confirmed poke rejection', async () => {
+    const f = await observedError(null);
+    try { const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); }
+    finally { await f.context.close(); }
+});
+test('read-only Pokes queries are distinguished from poke mutations', async () => {
+    const f = await observedError('PokesBackButtonStateQuery', 200, { code: 1675004, message: 'Rate limit exceeded', path: ['poke'] });
+    try { const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); }
+    finally { await f.context.close(); }
+});
+test('a known poke mutation error records a persistent, specific pause reason', async () => {
+    const f = await observedError('PokeMutation');
+    try {
+        const r = await f.tick(); assert.equal(r.kind, 'restricted'); assert.equal(r.state.held, true);
+        assert.equal(r.restrictionSource, 'poke-request'); assert.match(r.restrictionReason, /1675004/);
+        await f.page.reload(); await f.page.evaluate(script);
+        const restored = await f.tick(start + 60000, { state: r.state });
+        assert.equal(restored.kind, 'restricted'); assert.equal(restored.restrictionReason, r.restrictionReason);
+    } finally { await f.context.close(); }
+});
+test('a poke-specific error path attributes an otherwise unknown request', async () => {
+    const f = await observedError(null, 200, { code: 1675004, message: 'Rate limit exceeded', path: ['poke'] });
+    try { assert.equal((await f.tick()).kind, 'restricted'); } finally { await f.context.close(); }
+});
+test('HTTP 429 on unrelated traffic is temporary, while a poke HTTP 429 is explicit', async () => {
+    for (const operation of [null, 'ChatSidebarQuery', 'PokeMutation']) {
+        const f = await observedError(operation, 429, null);
+        try {
+            const r = await f.tick();
+            assert.equal(r.kind, operation === 'PokeMutation' ? 'restricted' : 'waiting');
+            if (operation === 'PokeMutation') assert.match(r.restrictionReason, /HTTP 429/);
+            else assert.equal(r.state.held, false);
+        } finally { await f.context.close(); }
+    }
+});
+test('an unlabelled request synchronously emitted by the poke click is attributable', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => window.fetch = async () => new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
+        await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
+        const r = await f.tick(start + 500);
+        assert.equal(r.kind, 'restricted'); assert.equal(r.attempts, 1);
+    } finally { await f.context.close(); }
+});
+test('an explicitly unrelated operation emitted during a click is not misattributed', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=ChatSidebarQuery'})")));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => window.fetch = async () => new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
+        await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
+        const r = await f.tick(start + 500);
+        assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false);
+    } finally { await f.context.close(); }
+});
+test('XHR errors use the same action scoping as fetch errors', async () => {
+    for (const operation of ['ChatSidebarQuery', 'PokeMutation']) {
+        const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+        try {
+            await f.context.route('**/api/graphql/', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ errors: [{ code: 1675004 }] }) }));
+            await f.page.evaluate(operation => new Promise(resolve => {
+                const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/graphql/');
+                xhr.addEventListener('loadend', resolve, { once: true });
+                xhr.send('fb_api_req_friendly_name=' + operation);
+            }), operation);
+            assert.equal((await f.tick()).kind, operation === 'PokeMutation' ? 'restricted' : 'waiting');
+        } finally { await f.context.close(); }
+    }
+});
+test('URL-encoded, JSON, URLSearchParams, and FormData names are scoped without saving secrets', async () => {
+    for (const format of ['encoded', 'json', 'params', 'form']) {
+        const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+        try {
+            await f.page.reload();
+            await f.page.evaluate(() => window.fetch = async () => new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
+            await f.page.evaluate(script);
+            await f.page.evaluate(async format => {
+                const fields = { fb_api_req_friendly_name: 'PokeMutation', fb_dtsg: 'FAKE_SECRET_NOT_TO_SAVE' };
+                let body;
+                if (format === 'encoded') body = new URLSearchParams(fields).toString();
+                if (format === 'json') body = JSON.stringify(fields);
+                if (format === 'params') body = new URLSearchParams(fields);
+                if (format === 'form') { body = new FormData(); for (const [k,v] of Object.entries(fields)) body.set(k,v); }
+                await fetch('/api/graphql/', { method: 'POST', body }); await new Promise(r => setTimeout(r, 15));
+            }, format);
+            const r = await f.tick(); assert.equal(r.kind, 'restricted');
+            assert.equal(JSON.stringify(r).includes('FAKE_SECRET_NOT_TO_SAVE'), false);
+            assert.equal(JSON.stringify(r).includes('fb_dtsg'), false);
+        } finally { await f.context.close(); }
+    }
+});
+test('explicit block notices retain protection and report their source', async () => {
+    for (const notice of ['<h1>You are temporarily blocked</h1>', '<h1>Rate limit exceeded</h1>', '<div role="alert">It looks like you were misusing this feature by going too fast.</div>']) {
+        const f = await fixture(pageHtml('<h2>Suggested</h2>' + notice));
+        try { const r = await f.tick(); assert.equal(r.kind, 'restricted'); assert.equal(r.restrictionSource, 'facebook-notice'); }
+        finally { await f.context.close(); }
+    }
+});
+test('an older saved pause is labelled as unknown and is not silently cleared', async () => {
+    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+    try {
+        const r = await f.tick(start, { state: { held: true } });
+        assert.equal(r.kind, 'restricted'); assert.equal(r.restrictionSource, 'legacy'); assert.match(r.restrictionReason, /previous version/);
+    } finally { await f.context.close(); }
+});
+test('repeated errors during a cooldown do not extend its retry deadline forever', async () => {
+    const f = await observedError('ChatSidebarQuery');
+    try {
+        await f.tick();
+        for (const elapsed of [10000, 20000, 29999, 30000]) {
+            await f.page.evaluate(async () => {
+                await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=ChatSidebarQuery' });
+                await new Promise(r => setTimeout(r, 15));
+            });
+            const r = await f.tick(start + elapsed);
+            assert.equal(r.kind, elapsed < 30000 ? 'waiting' : 'refresh');
+            if (r.state && elapsed < 30000) assert.equal(r.state.retryAt, start + 30000);
+        }
+    } finally { await f.context.close(); }
+});
+test('an unrelated error does not discard or interrupt an in-flight poke', async () => {
+    const handler = "this.disabled=true;fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=PokeMutation'});fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=ChatSidebarQuery'})";
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => window.fetch = (url, init) => {
+            if (init.body.includes('PokeMutation')) return new Promise(resolve => { window.finishPoke = resolve; });
+            return Promise.resolve(new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
+        });
+        await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
+        assert.equal((await f.tick(start + 500)).kind, 'waiting');
+        assert.equal((await f.tick(start + 30000)).kind, 'waiting');
+        await f.page.evaluate(async () => { finishPoke(new Response('{}')); await new Promise(r => setTimeout(r, 20)); });
+        const r = await f.tick(start + 31000);
+        assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); assert.equal(r.state.attempts, 1);
+        assert.equal((await f.tick(start + 61000)).kind, 'refresh');
     } finally { await f.context.close(); }
 });
