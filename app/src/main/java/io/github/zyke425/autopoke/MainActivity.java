@@ -9,10 +9,13 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -43,6 +46,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final String POKES = "https://www.facebook.com/pokes?ref=search";
@@ -50,6 +55,8 @@ public final class MainActivity extends Activity {
     private static final int MUTED = Color.rgb(169, 185, 205);
     private static final int MINT = Color.rgb(142, 232, 203);
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService stateWriter = Executors.newSingleThreadExecutor();
+    private final LoadRecovery recovery = new LoadRecovery();
     private WebView web;
     private SharedPreferences prefs;
     private TextView status, count, address;
@@ -58,9 +65,12 @@ public final class MainActivity extends Activity {
     private String script, defaultUserAgent;
     private JSONObject loopState = new JSONObject();
     private boolean running, active, loading, failed, evaluating;
-    private boolean keepAwake, desktop;
-    private int refreshSeconds, gapSeconds, navigation;
+    private boolean keepAwake, desktop, adaptive, recovering, savingGuard;
+    private int refreshSeconds, gapSeconds, navigation, loopEpoch, evaluationSequence;
+    private String recoveryMessage = "";
     private final Runnable poll = this::scan;
+    private final Runnable retryLoad = this::updateRecovery;
+    private Runnable loadTimeout, evaluationTimeout;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -68,7 +78,8 @@ public final class MainActivity extends Activity {
         running = prefs.getBoolean("running", false);
         keepAwake = prefs.getBoolean("keepAwake", true);
         desktop = prefs.getBoolean("desktop", false);
-        refreshSeconds = clamp(prefs.getInt("refresh", 1), 1, 300);
+        adaptive = prefs.getBoolean("adaptive", true);
+        refreshSeconds = clamp(prefs.getInt("refresh", 5), 1, 300);
         gapSeconds = clamp(prefs.getInt("gap", 7), 5, 300);
         try { loopState = new JSONObject(prefs.getString("state", "{}")); }
         catch (Exception ignored) { loopState = new JSONObject(); }
@@ -119,7 +130,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -134,13 +145,13 @@ public final class MainActivity extends Activity {
         toggle.setOnClickListener(v -> toggleLoop()); actions.addView(toggle, weighted());
         Button open = button("Open Pokes", Color.rgb(35, 50, 69), Color.WHITE);
         LinearLayout.LayoutParams openParams = weighted(); openParams.leftMargin = dp(8);
-        open.setOnClickListener(v -> openPokes()); actions.addView(open, openParams); panel.addView(actions);
+        open.setOnClickListener(v -> { recovery.reset(); openPokes(); }); actions.addView(open, openParams); panel.addView(actions);
         LinearLayout browserBar = new LinearLayout(this); browserBar.setGravity(Gravity.CENTER_VERTICAL);
         browserBar.setPadding(dp(12), 0, dp(6), 0); browserBar.setBackgroundColor(Color.rgb(25, 38, 55));
         address = text("facebook.com · secure connection", 11, MUTED); address.setSingleLine(true);
         browserBar.addView(address, new LinearLayout.LayoutParams(0, dp(40), 1)); address.setGravity(Gravity.CENTER_VERTICAL);
         Button reload = button("↻", Color.TRANSPARENT, MINT); reload.setContentDescription("Reload Facebook page");
-        reload.setOnClickListener(v -> { failed = false; web.reload(); });
+        reload.setOnClickListener(v -> { if (web != null) { recovery.reset(); failed = false; web.reload(); } });
         browserBar.addView(reload, new LinearLayout.LayoutParams(dp(48), dp(44))); root.addView(browserBar);
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         root.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
@@ -184,37 +195,98 @@ public final class MainActivity extends Activity {
                 return true;
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
-                navigation++; evaluating = false; loading = true; failed = false;
-                handler.removeCallbacks(poll);
+                navigation++; evaluationSequence++; evaluating = false; savingGuard = false; loading = true; failed = false; recovering = false;
+                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelEvaluationTimeout(); armLoadTimeout();
                 address.setText(trusted(url) ? Uri.parse(url).getHost() + " · secure connection" : "Page blocked");
                 status.setText("Loading Facebook…");
-                if (!trusted(url)) { view.stopLoading(); failed = true; loading = false; status.setText("Only secure Facebook pages can open inside this app."); }
+                if (!trusted(url)) { view.stopLoading(); pageError("Only secure Facebook pages can open inside this app."); }
             }
             @Override public void onPageFinished(WebView view, String url) {
                 if (!url.equals(view.getUrl())) return;
+                cancelLoadTimeout();
                 loading = false; CookieManager.getInstance().flush();
                 if (!failed && active && trusted(url)) schedule(250);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError error) {
-                if (req.isForMainFrame()) pageError("Could not load Facebook. Check your connection, then tap ↻.");
+                if (!req.isForMainFrame() || failed) return;
+                int code = error.getErrorCode();
+                if (pokesUrl(req.getUrl().toString()) && code != ERROR_FAILED_SSL_HANDSHAKE
+                    && code != ERROR_UNSUPPORTED_SCHEME && code != ERROR_AUTHENTICATION && code != ERROR_BAD_URL) {
+                    queueRecovery("Could not load Facebook.");
+                } else pageError("Could not load Facebook. Check the page, then tap ↻.");
             }
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse response) {
                 if (!req.isForMainFrame()) return;
-                if (response.getStatusCode() == 429) holdRestriction();
-                pageError(response.getStatusCode() == 429 ? "Facebook limited requests. Loop paused." : "Facebook returned an error. Tap ↻ to try again.");
+                if (response.getStatusCode() == 429) { holdRestriction(); pageError("Facebook limited requests. Loop paused."); }
+                else if (response.getStatusCode() >= 500 && pokesUrl(req.getUrl().toString())) queueRecovery("Facebook returned a temporary server error.");
+                else pageError("Facebook returned an error. Check the page, then tap ↻.");
             }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler ssl, SslError error) {
                 ssl.cancel(); pageError("Facebook's secure connection could not be verified.");
             }
             @Override public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
                 running = false; prefs.edit().putBoolean("running", false).apply();
-                handler.removeCallbacks(poll);
+                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
                 ((ViewGroup) web.getParent()).removeView(web); web.destroy(); web = null;
                 new AlertDialog.Builder(MainActivity.this).setMessage("Android restarted the page. Reopen AutoPoke to continue.")
                     .setPositiveButton("Reopen", (d, w) -> recreate()).setCancelable(false).show();
                 return true;
             }
         });
+    }
+
+    private boolean pokesUrl(String url) {
+        if (!trusted(url)) return false;
+        String path = Uri.parse(url).getPath();
+        return path != null && path.matches(".*/pokes(?:\\.php)?/?");
+    }
+    private boolean hasNetwork() {
+        ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (manager == null) return false;
+        NetworkCapabilities capabilities = manager.getNetworkCapabilities(manager.getActiveNetwork());
+        // Some VPNs block Android's validation probes even while Facebook works.
+        // Check for an Internet-capable network; real load errors still use backoff.
+        return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+    }
+    private void cancelLoadTimeout() { if (loadTimeout != null) handler.removeCallbacks(loadTimeout); loadTimeout = null; }
+    private void armLoadTimeout() {
+        cancelLoadTimeout();
+        final int generation = navigation;
+        loadTimeout = () -> {
+            if (generation == navigation && active && running && loading && web != null && pokesUrl(web.getUrl())) queueRecovery("The Facebook page took too long to load.");
+        };
+        if (active) handler.postDelayed(loadTimeout, 45000);
+    }
+    private void cancelEvaluationTimeout() { if (evaluationTimeout != null) handler.removeCallbacks(evaluationTimeout); evaluationTimeout = null; }
+    private void armEvaluationTimeout() {
+        cancelEvaluationTimeout();
+        final int sequence = evaluationSequence;
+        evaluationTimeout = () -> {
+            if (!active || !evaluating || sequence != evaluationSequence) return;
+            evaluationSequence++; evaluating = false; setRunning(false);
+            status.setText("The page stopped responding. Loop paused; reload and check Facebook.");
+        };
+        handler.postDelayed(evaluationTimeout, 15000);
+    }
+    private void queueRecovery(String message) {
+        if (recovering || web == null) return;
+        if (!running || loopState.optBoolean("held")) { pageError(message + " Tap ↻ to retry."); return; }
+        loading = false; failed = true; evaluating = false; savingGuard = false; recovering = true;
+        navigation++; evaluationSequence++; handler.removeCallbacks(poll); cancelLoadTimeout(); cancelEvaluationTimeout();
+        web.stopLoading();
+        if (!recovery.queue(SystemClock.elapsedRealtime())) {
+            recovering = false; setRunning(false); status.setText("Several page loads failed. Loop paused; check your connection and tap Start."); return;
+        }
+        recoveryMessage = message; updateRecovery();
+    }
+    private void updateRecovery() {
+        handler.removeCallbacks(retryLoad);
+        if (!active || !running || !recovering || web == null || loopState.optBoolean("held")) return;
+        long remaining = recovery.remaining(SystemClock.elapsedRealtime());
+        if (!hasNetwork()) status.setText("Connection unavailable. Waiting for Internet access…");
+        else if (remaining > 0) status.setText(recoveryMessage + " Retrying in " + ((remaining + 999) / 1000) + "s.");
+        else { recovering = false; openPokes(); return; }
+        handler.postDelayed(retryLoad, 1000);
     }
 
     static boolean trusted(String url) {
@@ -228,41 +300,71 @@ public final class MainActivity extends Activity {
     }
 
     private void pageError(String message) {
-        loading = false; failed = true; handler.removeCallbacks(poll); status.setText(message);
+        loading = false; failed = true; recovering = false; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
+        cancelLoadTimeout(); cancelEvaluationTimeout(); status.setText(message);
     }
     private void schedule(long delay) {
         handler.removeCallbacks(poll);
         if (active && !failed && !loading && web != null) handler.postDelayed(poll, delay);
     }
     private void scan() {
-        if (!active || loading || failed || web == null || evaluating || !trusted(web.getUrl())) return;
+        if (!active || loading || failed || web == null || evaluating || savingGuard || !trusted(web.getUrl())) return;
         if (!running) { renderControls(); return; }
+        if (!hasNetwork()) { status.setText("Connection unavailable. Waiting for Internet access…"); schedule(1000); return; }
+        evaluateEngine(null);
+    }
+    private void evaluateEngine(String token) {
+        if (!active || !running || web == null || evaluating || savingGuard || failed || loading || !trusted(web.getUrl())) return;
         final int generation = navigation;
+        final int epoch = loopEpoch;
+        final int sequence = ++evaluationSequence;
         JSONObject cfg = new JSONObject();
         try {
             cfg.put("running", running); cfg.put("now", System.currentTimeMillis());
-            cfg.put("refreshMs", refreshSeconds * 1000); cfg.put("gapMs", gapSeconds * 1000); cfg.put("state", loopState);
+            cfg.put("refreshMs", refreshSeconds * 1000); cfg.put("gapMs", gapSeconds * 1000); cfg.put("state", loopState); cfg.put("adaptive", adaptive);
         } catch (Exception error) { pageError("Settings could not be loaded. Restart the app."); return; }
         evaluating = true;
-        String expression = "(function(){try{" + script + "\nreturn JSON.stringify(window.__autoPokeAndroid.tick(" + cfg + "));}catch(e){return JSON.stringify({kind:'error',message:'Page script failed. Stop and reload Facebook.'});}})()";
+        armEvaluationTimeout();
+        String call = token == null ? "tick(" + cfg + ")" : "execute(" + cfg + "," + JSONObject.quote(token) + ")";
+        String expression = "(function(){try{" + script + "\nreturn JSON.stringify(window.__autoPokeAndroid." + call + ");}catch(e){return JSON.stringify({kind:'error',message:'Page script failed. Stop and reload Facebook.'});}})()";
         web.evaluateJavascript(expression, raw -> {
             // Never apply callbacks from a replaced document, stopped loop, or hidden activity.
-            if (generation != navigation || web == null) return;
-            evaluating = false;
+            if (generation != navigation || sequence != evaluationSequence || web == null) return;
+            evaluating = false; cancelEvaluationTimeout();
             try {
                 Object decoded = new JSONTokener(raw).nextValue();
                 if (!(decoded instanceof String)) { schedule(500); return; }
                 JSONObject result = new JSONObject((String) decoded);
+                String kind = result.optString("kind");
                 if (result.has("state")) {
                     loopState = result.getJSONObject("state");
-                    prefs.edit().putString("state", loopState.toString()).apply();
+                    if (!"prepared".equals(kind)) persistState();
+                }
+                if ("prepared".equals(kind)) {
+                    savingGuard = true;
+                    if (active && running) status.setText("Preparing poke back…");
+                    final String savedGuard = loopState.toString();
+                    final String actionToken = result.getString("token");
+                    // Commit on a worker, then click only after the guard is on disk.
+                    stateWriter.execute(() -> {
+                        boolean saved = prefs.edit().putString("state", savedGuard).commit();
+                        handler.post(() -> {
+                            if (web == null || generation != navigation) return;
+                            savingGuard = false;
+                            if (!saved) { setRunning(false); status.setText("Could not save the click guard. Loop paused."); return; }
+                            if (active && running && epoch == loopEpoch && hasNetwork()) evaluateEngine(actionToken);
+                            else if (active && running) schedule(500);
+                        });
+                    });
+                    return;
                 }
                 if (!active || !running) { renderControls(); return; }
                 status.setText(result.optString("message", "Watching for Poke back…"));
                 count.setText(result.optInt("attempts") + " click attempts · " + result.optInt("detected") + " detected");
-                String kind = result.optString("kind");
                 if ("restricted".equals(kind)) { holdRestriction(); return; }
                 if ("error".equals(kind)) { setRunning(false); status.setText(result.optString("message")); return; }
+                if ("stalled".equals(kind)) { queueRecovery(result.optString("message")); return; }
+                if ("watching".equals(kind) || "clicked".equals(kind)) recovery.reset();
                 if ("refresh".equals(kind)) { openPokes(); return; }
             } catch (Exception error) {
                 setRunning(false); status.setText("The page response could not be read. Reload Facebook to continue."); return;
@@ -272,8 +374,17 @@ public final class MainActivity extends Activity {
     }
     private void holdRestriction() {
         try { loopState.put("held", true); } catch (Exception ignored) { }
-        prefs.edit().putString("state", loopState.toString()).apply();
+        persistState();
         setRunning(false); status.setText("Facebook reported a restriction. Check the page before restarting.");
+    }
+    private void persistState() {
+        // Serialize state writes with the pre-click journal so a late write cannot clear a restriction.
+        final String serialized = loopState.toString();
+        stateWriter.execute(() -> {
+            if (!prefs.edit().putString("state", serialized).commit()) handler.post(() -> {
+                if (web != null) { setRunning(false); status.setText("Settings could not be saved. Loop paused."); }
+            });
+        });
     }
     private void toggleLoop() {
         if (loopState.optBoolean("held")) {
@@ -281,7 +392,7 @@ public final class MainActivity extends Activity {
                 .setMessage("Wait until a manual poke works on Facebook. Resume only after checking the page.")
                 .setPositiveButton("Manual poke works — resume", (d, w) -> {
                     try { loopState.put("held", false); } catch (Exception ignored) { }
-                    prefs.edit().putString("state", loopState.toString()).apply();
+                    persistState();
                     // Reload removes the old document's held flag; keep duplicate guards.
                     setRunning(true); openPokes();
                 }).setNegativeButton("Keep paused", null).show();
@@ -291,21 +402,26 @@ public final class MainActivity extends Activity {
         if (running && failed) openPokes();
     }
     private void setRunning(boolean value) {
+        loopEpoch++;
+        if (value && !running) recovery.reset();
         running = value; prefs.edit().putBoolean("running", running).apply();
-        handler.removeCallbacks(poll); renderControls(); if (running) schedule(100);
+        handler.removeCallbacks(poll);
+        if (!running) { recovering = false; handler.removeCallbacks(retryLoad); cancelLoadTimeout(); }
+        renderControls(); if (running) { if (loading) armLoadTimeout(); else schedule(100); }
     }
     private void renderControls() {
         if (toggle == null) return;
         toggle.setText(loopState.optBoolean("held") ? "Review pause" : running ? "Stop loop" : "Start loop");
         toggle.setBackground(rounded(running ? Color.rgb(250, 185, 179) : MINT, 12));
         if (!running) status.setText(loopState.optBoolean("held") ? "Facebook restriction. Check manually before resuming." : "Loop stopped. Tap Start to watch for poke backs.");
-        count.setText(loopState.optInt("attempts") + " click attempts · refresh " + refreshSeconds + "s");
+        count.setText(loopState.optInt("attempts") + " click attempts · " + (adaptive ? "adaptive refresh" : "refresh " + refreshSeconds + "s"));
         if (running && active && keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
     private void openPokes() {
         if (web == null) return;
-        failed = false; handler.removeCallbacks(poll);
+        if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
+        failed = false; recovering = false; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
         // loadUrl also reloads an identical URL, without repeatedly growing WebView history.
         if (POKES.equals(web.getUrl())) web.reload(); else web.loadUrl(POKES);
     }
@@ -328,6 +444,7 @@ public final class MainActivity extends Activity {
         EditText gap = number(form, "Minimum time between clicks (5–300 seconds)", gapSeconds);
         CheckBox awake = new CheckBox(this); awake.setText("Keep screen awake while running"); awake.setChecked(keepAwake); form.addView(awake);
         CheckBox desktopBox = new CheckBox(this); desktopBox.setText("Desktop Facebook layout"); desktopBox.setChecked(desktop); form.addView(desktopBox);
+        CheckBox adaptiveBox = new CheckBox(this); adaptiveBox.setText("Increase refresh delay when idle"); adaptiveBox.setChecked(adaptive); form.addView(adaptiveBox);
         TextView info = text("Only Poke back is clicked. A click is an attempt, not confirmation. The loop pauses while the app is hidden and resumes when you return. Facebook sign-in and cookies stay in this app's WebView.", 12, MUTED);
         info.setPadding(0, dp(8), 0, dp(12)); form.addView(info);
         Button logout = button("Sign out / clear Facebook data", Color.rgb(35, 50, 69), Color.WHITE); form.addView(logout);
@@ -349,8 +466,8 @@ public final class MainActivity extends Activity {
                 if (nextRefresh < 1 || nextRefresh > 300) { refresh.setError("Enter 1 to 300"); return; }
                 if (nextGap < 5 || nextGap > 300) { gap.setError("Enter 5 to 300"); return; }
                 boolean layoutChanged = desktop != desktopBox.isChecked();
-                refreshSeconds = nextRefresh; gapSeconds = nextGap; keepAwake = awake.isChecked(); desktop = desktopBox.isChecked();
-                prefs.edit().putInt("refresh", nextRefresh).putInt("gap", nextGap).putBoolean("keepAwake", keepAwake).putBoolean("desktop", desktop).apply();
+                refreshSeconds = nextRefresh; gapSeconds = nextGap; keepAwake = awake.isChecked(); desktop = desktopBox.isChecked(); adaptive = adaptiveBox.isChecked();
+                prefs.edit().putInt("refresh", nextRefresh).putInt("gap", nextGap).putBoolean("keepAwake", keepAwake).putBoolean("desktop", desktop).putBoolean("adaptive", adaptive).apply();
                 renderControls(); dialog.dismiss();
                 if (layoutChanged) { applyUserAgent(); openPokes(); } else schedule(100);
             } catch (NumberFormatException error) { refresh.setError("Enter whole seconds in both fields"); }
@@ -359,10 +476,17 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume(); active = true;
-        if (web != null) { web.onResume(); web.resumeTimers(); renderControls(); schedule(250); }
+        if (web != null) {
+            web.onResume(); web.resumeTimers(); renderControls();
+            if (recovering) updateRecovery();
+            else if (loading) armLoadTimeout();
+            else if (evaluating) armEvaluationTimeout();
+            else if (savingGuard) { /* The saved-guard callback resumes polling. */ }
+            else schedule(250);
+        }
     }
     @Override protected void onPause() {
-        active = false; handler.removeCallbacks(poll);
+        active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
         if (web != null) { web.onPause(); web.pauseTimers(); CookieManager.getInstance().flush(); }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();
     }
@@ -373,7 +497,7 @@ public final class MainActivity extends Activity {
         if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed();
     }
     @Override protected void onDestroy() {
-        handler.removeCallbacks(poll);
+        handler.removeCallbacksAndMessages(null); stateWriter.shutdown();
         if (web != null) { ((ViewGroup) web.getParent()).removeView(web); web.destroy(); web = null; }
         super.onDestroy();
     }

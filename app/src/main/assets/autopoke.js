@@ -36,6 +36,7 @@
         }
         return (a >>> 0).toString(36) + (b >>> 0).toString(36);
     }
+    const withoutTime = text => text.replace(/\b\d+\s*(?:s|m|h|d|sec(?:ond)?s?|min(?:ute)?s?|hours?|days?|weeks?)\s*(?:ago)?\b/g, '').trim();
     function person(button) {
         let row = null, profile = null;
         for (let el = button.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
@@ -54,17 +55,18 @@
         }
         if (!row) return null;
         let text = normalize(row.innerText || row.textContent).replace(/poke\s*back/g, '').trim();
-        let identity = text;
+        let identity = withoutTime(text).replace(/[\d,]+\s+(?:pokes?|times in a row)\b/g, '').trim();
         if (profile) {
             const url = new URL(profile.getAttribute('href'), location.href);
             identity = url.pathname + (url.searchParams.has('id') ? '?id=' + url.searchParams.get('id') : '');
         }
         const counter = text.match(/[\d,]+\s+(?:pokes?|times in a row)\b/);
         // Relative timestamps do not represent a new poke.
-        text = text.replace(/\b\d+\s*(?:s|m|h|d|sec(?:ond)?s?|min(?:ute)?s?|hours?|days?|weeks?)\s*(?:ago)?\b/g, '').trim();
+        text = withoutTime(text);
         return { button, identity: hash(identity), key: hash(identity + '|' + (counter ? counter[0] : text)) };
     }
-    let state = null, pending = null, readySince = 0, recoveryUntil = 0;
+    let state = null, pending = null, prepared = null, authorizedToken = null;
+    let readySince = 0, stalledSince = 0, healthySince = 0;
     let dirty = false, networkRestricted = false, networkError = false, networkInFlight = 0;
     function readErrors(value) {
         if (!value || typeof value !== 'object') return;
@@ -138,7 +140,10 @@
         if (!state) {
             const saved = cfg.state || {};
             state = { attempts: Math.max(0, Number(saved.attempts) || 0), nextAt: Number(saved.nextAt) || 0,
-                held: saved.held === true, records: Array.isArray(saved.records) ? saved.records.slice(-300) : [] };
+                held: saved.held === true,
+                idleRounds: Math.max(0, Math.min(6, Number(saved.idleRounds) || 0)),
+                failures: Math.max(0, Math.min(5, Number(saved.failures) || 0)), retryAt: Number(saved.retryAt) || 0,
+                records: Array.isArray(saved.records) ? saved.records.filter(r => r && typeof r.key === 'string').slice(-300) : [] };
         }
         const refreshMs = Math.max(1000, Math.min(300000, Number(cfg.refreshMs) || 1000));
         const gapMs = Math.max(5000, Math.min(300000, Number(cfg.gapMs) || 7000));
@@ -150,10 +155,28 @@
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
         if (!cfg.running || document.hidden) { readySince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
         if (state.held) return result('restricted', 'Facebook reported a restriction. Check it manually before resuming.');
+        const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"],h1,h2')).find(el => visible(el)
+            && /rate limit exceeded|temporarily blocked|try again later|going too fast|we limit how often/i.test(el.textContent || ''));
+        if (networkRestricted || warning) {
+            state.held = true; dirty = true; pending = null; prepared = null;
+            return result('restricted', 'Facebook reported a restriction. Auto-poking and refresh are paused.');
+        }
         if (/^\/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.]|$)/i.test(location.pathname)
             || Array.from(document.querySelectorAll('input[type="password"]')).some(visible)) {
             readySince = 0; return result('login', 'Sign in to Facebook, then tap Open Pokes.');
         }
+        if (pending && now - pending.sentAt >= 90000) {
+            pending = null; prepared = null;
+            return result('error', 'The poke result is still unknown after 90s. Loop paused; check Facebook manually.');
+        }
+        if (networkError) {
+            pending = null; prepared = null; networkError = false; healthySince = 0;
+            state.failures = Math.min(5, state.failures + 1);
+            state.retryAt = now + Math.min(300000, 30000 * Math.pow(2, state.failures - 1));
+            readySince = 0; dirty = true;
+        }
+        if (now < state.retryAt) return result('waiting', 'A Facebook request failed. Retrying in ' + Math.ceil((state.retryAt - now) / 1000) + 's.');
+        if (state.retryAt) { state.retryAt = 0; dirty = true; return result('refresh', 'Reloading after the temporary error.'); }
         if (document.readyState !== 'complete' || !document.body) { readySince = 0; return result('loading', 'Waiting for Facebook to finish loading…'); }
         const buttons = backs(document).filter(visible);
         const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'));
@@ -166,20 +189,30 @@
         // Path alone is insufficient: don't reload an unrendered shell forever.
         if (!((exactRoute || (heading && evidence)) && (buttons.length || evidence))) {
             readySince = 0;
+            if (pending && networkInFlight) return result('waiting', 'Waiting for Facebook’s request to finish…');
+            if (exactRoute) {
+                if (!stalledSince) stalledSince = now;
+                if (now - stalledSince >= 45000) return result('stalled', 'The Pokes view did not finish rendering.');
+            } else stalledSince = 0;
             return result('offpage', exactRoute ? 'Waiting for the Pokes view to render…' : 'Tap Open Pokes. The loop resumes on the Pokes page.');
         }
-        const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"]')).find(el => visible(el)
-            && /rate limit exceeded|temporarily blocked|try again later|going too fast|we limit how often/i.test(el.textContent || ''));
-        if (networkRestricted || warning) {
-            state.held = true; dirty = true; pending = null;
-            return result('restricted', 'Facebook reported a restriction. Auto-poking and refresh are paused.');
-        }
-        if (networkError && pending) {
-            pending = null; networkError = false; recoveryUntil = now + 30000; readySince = 0;
-        }
-        if (now < recoveryUntil) return result('waiting', 'A Facebook request failed. Retrying in ' + Math.ceil((recoveryUntil - now) / 1000) + 's.');
-        if (recoveryUntil) { recoveryUntil = 0; readySince = now; return result('refresh', 'Reloading after the temporary error.'); }
+        stalledSince = 0;
+        if (!healthySince) healthySince = now;
+        if (state.failures && !networkInFlight && now - healthySince >= 30000) { state.failures = 0; dirty = true; }
         const items = buttons.map(person).filter(Boolean);
+        if (prepared) {
+            if (now - prepared.at >= 15000) { prepared = null; return result('watching', 'The saved click expired. Watching for a new eligible poke.'); }
+            if (authorizedToken !== prepared.token) return result('waiting', 'Preparing poke back…');
+            const action = prepared; prepared = null;
+            const current = person(action.button);
+            if (!current || current.key !== action.key || !usable(action.button)) return result('watching', 'The row changed before the click. Scanning again.');
+            pending = { key: action.key, sentAt: now };
+            state.nextAt = Math.max(state.nextAt, now + gapMs);
+            state.attempts++; dirty = true; networkError = false;
+            try { action.button.click(); }
+            catch (_) { pending = null; return result('error', 'The control could not be clicked. Stop and check Facebook.'); }
+            return result('clicked', 'Poke-back click attempted.', { detected: buttons.length });
+        }
         if (pending) {
             const unchanged = items.some(item => item.key === pending.key && usable(item.button));
             const elapsed = now - pending.sentAt;
@@ -195,23 +228,32 @@
         });
         if (item) {
             readySince = 0;
+            if (state.idleRounds) { state.idleRounds = 0; dirty = true; }
             if (now < state.nextAt) return result('waiting', 'Poke back found. Next attempt in ' + Math.ceil((state.nextAt - now) / 1000) + 's.', { detected: buttons.length });
             let record = state.records.find(r => r.key === item.key);
             if (!record) { record = { key: item.key, tries: 0, readyAt: 0 }; state.records.push(record); }
             record.tries++; record.readyAt = now + 180000;
             state.records = state.records.slice(-300);
             state.nextAt = now + gapMs;
-            pending = { key: item.key, sentAt: now };
             networkError = false;
             dirty = true;
-            try { item.button.click(); state.attempts++; }
-            catch (_) { pending = null; return result('error', 'The control could not be clicked. Stop and check Facebook.'); }
-            return result('clicked', 'Poke-back click attempted.', { detected: buttons.length });
+            const token = hash(item.key + '|' + now + '|' + record.tries);
+            prepared = { token, button: item.button, key: item.key, at: now };
+            // Android must durably save the returned guard before calling execute().
+            return result('prepared', 'Preparing poke back…', { token, detected: buttons.length });
         }
         // Even deferred unchanged rows refresh, so a new incoming poke can appear.
         if (!readySince) readySince = now;
-        if (now - readySince >= refreshMs) { readySince = 0; return result('refresh', 'Refreshing to look for new poke backs.', { detected: buttons.length }); }
-        return result('watching', buttons.length ? 'Waiting for an eligible Poke back. Refreshing shortly…' : 'Watching for Poke back. Refreshing shortly…', { detected: buttons.length });
+        const idleDelay = cfg.adaptive === false ? refreshMs : Math.max(refreshMs, Math.min(60000, refreshMs * Math.pow(2, state.idleRounds)));
+        if (now - readySince >= idleDelay) {
+            readySince = 0; state.idleRounds = Math.min(6, state.idleRounds + 1); dirty = true;
+            return result('refresh', 'Refreshing to look for new poke backs.', { detected: buttons.length });
+        }
+        return result('watching', 'Watching for an eligible Poke back. Refresh in ' + Math.ceil((idleDelay - (now - readySince)) / 1000) + 's.', { detected: buttons.length });
     }
-    window.__autoPokeAndroid = { tick };
+    window.__autoPokeAndroid = { tick, execute(cfg, token) {
+        if (!prepared || prepared.token !== token) return { kind: 'waiting', message: 'The saved click is no longer available.', attempts: state ? state.attempts : 0 };
+        authorizedToken = token;
+        try { return tick(cfg); } finally { authorizedToken = null; }
+    } };
 })();

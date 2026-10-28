@@ -39,7 +39,7 @@ jobs:
       - name: Install Android SDK 35
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Compile and lint
-        run: ./gradlew --no-daemon :app:assembleDebug :app:lintDebug
+        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
       - name: Prepare installable APK
         run: cp app/build/outputs/apk/debug/app-debug.apk AutoPoke-debug.apk
       - uses: actions/upload-artifact@v4

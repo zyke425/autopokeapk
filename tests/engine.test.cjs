@@ -17,10 +17,19 @@ async function fixture(html, url = 'https://www.facebook.com/pokes?ref=search') 
     const page = await context.newPage();
     await page.goto(url);
     await page.evaluate(script);
-    const tick = (now = start, changes = {}) => page.evaluate(cfg => window.__autoPokeAndroid.tick(cfg), {
+    const config = (now = start, changes = {}) => ({
         running: true, refreshMs: 1000, gapMs: 7000, now, state: {}, ...changes
     });
-    return { context, page, tick };
+    const rawTick = (now = start, changes = {}) => page.evaluate(cfg => window.__autoPokeAndroid.tick(cfg), config(now, changes));
+    const execute = (token, now = start, changes = {}) => page.evaluate(({cfg, token}) => window.__autoPokeAndroid.execute(cfg, token), { cfg: config(now, changes), token });
+    const tick = async (now = start, changes = {}) => {
+        const reservation = await rawTick(now, changes);
+        if (reservation.kind !== 'prepared') return reservation;
+        // Simulate Android's durable journal boundary before executing the token.
+        assert.ok(reservation.state?.records.length, 'a guard must be returned before a click');
+        return execute(reservation.token, now, changes);
+    };
+    return { context, page, tick, rawTick, execute };
 }
 
 test('clicks Poke back and never suggested Poke', async () => {
@@ -162,7 +171,7 @@ test('a loading shell is not repeatedly refreshed', async () => {
     const f = await fixture('<html><body><div>Loading…</div></body></html>');
     try {
         assert.equal((await f.tick()).kind, 'offpage');
-        assert.equal((await f.tick(start + 300000)).kind, 'offpage');
+        assert.equal((await f.tick(start + 45000)).kind, 'stalled');
     } finally { await f.context.close(); }
 });
 test('disabled, hidden and unidentified controls are not clicked', async () => {
@@ -183,6 +192,137 @@ test('relative time changes do not bypass the saved duplicate guard', async () =
     try {
         const r = await f.tick(); await f.page.reload();
         await f.page.locator('article span').evaluate(el => el.textContent = 'poked you 20m ago');
+        await f.page.evaluate(script);
+        assert.equal((await f.tick(start + 30000, { state: r.state })).kind, 'watching');
+    } finally { await f.context.close(); }
+});
+
+test('a click requires a saved guard and the matching one-use execution token', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reserved = await f.rawTick();
+        assert.equal(reserved.kind, 'prepared'); assert.equal(reserved.state.records[0].tries, 1);
+        assert.equal(reserved.state.attempts, 0);
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+        assert.equal((await f.execute('wrong-token')).kind, 'waiting');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+        assert.equal((await f.execute(reserved.token)).kind, 'clicked');
+        assert.equal((await f.execute(reserved.token, start + 1)).kind, 'waiting');
+        assert.equal(await f.page.evaluate(() => clicks), 1);
+    } finally { await f.context.close(); }
+});
+test('an interrupted click remains guarded when Android restores the journal', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reserved = await f.rawTick();
+        await f.page.reload(); await f.page.evaluate(script);
+        assert.equal((await f.execute(reserved.token)).kind, 'waiting');
+        assert.equal((await f.tick(start + 15000, { state: reserved.state })).kind, 'watching');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('row changes and expired reservations cancel the prepared click', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reserved = await f.rawTick();
+        await f.page.locator('article span').evaluate(el => el.textContent = '20 pokes · poked you now');
+        assert.equal((await f.execute(reserved.token)).kind, 'watching');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+        await f.page.reload(); await f.page.evaluate(script);
+        const again = await f.rawTick();
+        assert.equal((await f.execute(again.token, start + 15000)).kind, 'watching');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('Stop between preparation and execution prevents the click', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reserved = await f.rawTick();
+        assert.equal((await f.execute(reserved.token, start, { running: false })).kind, 'paused');
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('a restriction replacing the entire page cancels a prepared click', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const reserved = await f.rawTick();
+        await f.page.evaluate(() => document.body.innerHTML = '<h1>You’re temporarily blocked</h1><p>Going too fast.</p>');
+        const r = await f.execute(reserved.token);
+        assert.equal(r.kind, 'restricted'); assert.equal(r.state.held, true);
+        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+    } finally { await f.context.close(); }
+});
+test('restriction dialogs on a checkpoint page are recognized before login routing', async () => {
+    const f = await fixture('<h1>Temporarily blocked</h1>', 'https://www.facebook.com/checkpoint/');
+    try { assert.equal((await f.tick()).kind, 'restricted'); } finally { await f.context.close(); }
+});
+test('adaptive idle refresh backs off across reloads and caps at 60 seconds', async () => {
+    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+    try {
+        let state = {}, now = start;
+        for (const seconds of [5, 10, 20, 40, 60, 60, 60]) {
+            assert.equal((await f.tick(now, { state, refreshMs: 5000 })).kind, 'watching');
+            assert.equal((await f.tick(now + seconds * 1000 - 1, { state, refreshMs: 5000 })).kind, 'watching');
+            const r = await f.tick(now + seconds * 1000, { state, refreshMs: 5000 });
+            assert.equal(r.kind, 'refresh'); state = r.state;
+            await f.page.reload(); await f.page.evaluate(script); now += seconds * 1000 + 100;
+        }
+    } finally { await f.context.close(); }
+});
+test('fixed refresh remains configurable and adaptive mode does not shorten a long user delay', async () => {
+    for (const [refreshMs, adaptive, rounds] of [[3000, false, 6], [120000, true, 6]]) {
+        const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+        try {
+            const changes = { refreshMs, adaptive, state: { idleRounds: rounds } };
+            await f.tick(start, changes);
+            assert.equal((await f.tick(start + refreshMs - 1, changes)).kind, 'watching');
+            assert.equal((await f.tick(start + refreshMs, changes)).kind, 'refresh');
+        } finally { await f.context.close(); }
+    }
+});
+test('an eligible incoming poke resets the idle backoff', async () => {
+    const f = await fixture(pageHtml(row()));
+    try {
+        const r = await f.tick(start, { state: { idleRounds: 6 } });
+        assert.equal(r.kind, 'clicked'); assert.equal(r.state.idleRounds, 0);
+    } finally { await f.context.close(); }
+});
+test('temporary-error backoff survives a reload and escalates repeated failures', async () => {
+    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+    try {
+        async function failRequest() {
+            await f.page.reload();
+            await f.page.evaluate(() => window.fetch = () => Promise.reject(new Error('Offline')));
+            await f.page.evaluate(script);
+            await f.page.evaluate(async () => { try { await fetch('/api/graphql/'); } catch (_) {} });
+        }
+        await failRequest();
+        const first = await f.tick(); assert.equal(first.state.retryAt, start + 30000);
+        await f.page.reload(); await f.page.evaluate(script);
+        assert.equal((await f.tick(start + 29999, { state: first.state })).kind, 'waiting');
+        const refresh = await f.tick(start + 30000, { state: first.state }); assert.equal(refresh.kind, 'refresh');
+        await failRequest();
+        const second = await f.tick(start + 31000, { state: refresh.state });
+        assert.equal(second.state.failures, 2); assert.equal(second.state.retryAt, start + 91000);
+    } finally { await f.context.close(); }
+});
+test('an unresolved poke request pauses for manual review instead of hanging forever', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
+    try {
+        await f.page.reload(); await f.page.evaluate(() => window.fetch = () => new Promise(() => {}));
+        await f.page.evaluate(script); await f.tick();
+        assert.equal((await f.tick(start + 89999)).kind, 'waiting');
+        assert.equal((await f.tick(start + 90000)).kind, 'error');
+        assert.equal(await f.page.evaluate(() => clicks), 1);
+    } finally { await f.context.close(); }
+});
+test('relative times in text-only person rows do not create a second identity', async () => {
+    const html = pageHtml(row().replace(/<a[^>]*>Alex<\/a>/, '<span>Alex</span>').replace('19 pokes · ', ''));
+    const f = await fixture(html);
+    try {
+        const r = await f.tick(); assert.equal(r.kind, 'clicked');
+        await f.page.reload();
+        await f.page.locator('article span').nth(1).evaluate(el => el.textContent = 'poked you 20m ago');
         await f.page.evaluate(script);
         assert.equal((await f.tick(start + 30000, { state: r.state })).kind, 'watching');
     } finally { await f.context.close(); }
