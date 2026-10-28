@@ -38,7 +38,8 @@
         if (window.__autoPokeBasic && window.__autoPokeBasic.read().state === 'offer') {
             blankSince = 0; stalledSince = 0; return result('basic-setup');
         }
-        const exact = /^\/pokes(?:\.php)?\/?$/.test(location.pathname);
+        // Client navigation can change the view without changing its URL.
+        const exact = cfg.navigationView !== true && /^\/pokes(?:\.php)?\/?$/.test(location.pathname);
         const expected = exact || cfg.pokesExpected === true;
         if ((expected || cfg.browserExpected === true) && !renderedContent()) {
             if (!blankSince) blankSince = now;
@@ -49,9 +50,11 @@
         if (!document.body || document.readyState === 'loading') return result('loading');
         const body = normalize(document.body.innerText);
         const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],span'))
-            .filter(el => visible(el) && !el.closest('a,button,[role="button"],nav,header'));
+            .filter(el => visible(el) && !el.closest('a,button,[role="button"]')
+                && (cfg.navigationView === true || !el.closest('nav,header')));
         const heading = headings.some(el => normalize(el.textContent) === 'pokes');
-        const evidence = /poked you|times in a row|suggested pokes|no pokes|no new pokes|friends who poked you|friends you poked/.test(body)
+        const evidence = /suggested pokes|no pokes|no new pokes|friends who poked you|friends you poked/.test(body)
+            || (cfg.navigationView !== true && /poked you|times in a row/.test(body))
             || headings.some(el => normalize(el.textContent) === 'suggested');
         const backs = Array.from(document.querySelectorAll('button,a,[role="button"],input[type="submit"]')).some(el => visible(el)
             && /poke\s*back/i.test(el.innerText || el.value || el.getAttribute('aria-label') || el.textContent));

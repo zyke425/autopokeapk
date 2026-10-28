@@ -83,6 +83,10 @@ public final class MainActivity extends Activity {
     private boolean browserRepairPokes;
     private boolean pendingPokesEntry, entryBusy, entryAwaiting, menuAttempted;
     private int entrySequence;
+    private boolean uiPokesRefresh;
+    private int uiRefreshCycle;
+    private long nextUiRefreshAt;
+    private String lastUiRefreshPhase = "idle";
     private int reportSequence;
     private String lastBasicState = "unknown";
     private JSONObject loopState = new JSONObject();
@@ -179,7 +183,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.9", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.10", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -208,7 +212,7 @@ public final class MainActivity extends Activity {
         Button reload = button("↻", Color.TRANSPARENT, MINT); reload.setContentDescription("Reload Facebook page");
         reload.setOnClickListener(v -> {
             recovery.reset(); browserRecovery.reset();
-            if (basicMode && pokesExpected && !pendingPokesEntry && !basicSetupOpen) refreshPokes();
+            if (basicMode && pokesExpected && !basicSetupOpen) refreshPokes();
             else if (web != null) { finishPageWait(); failed = false; web.reload(); }
             else openPokes();
         });
@@ -271,6 +275,12 @@ public final class MainActivity extends Activity {
                 if (!request.isForMainFrame()) return false;
                 String url = request.getUrl().toString();
                 if (trusted(url)) {
+                    if (uiPokesRefresh && !request.hasGesture() && !authenticationUrl(url)) {
+                        // A refresh may activate the site's client router, but
+                        // must not replace the working carrier document.
+                        lastUiRefreshPhase = "document-blocked";
+                        return true;
+                    }
                     if (request.hasGesture()) {
                         pokesExpected = pokesUrl(url);
                         if (pokesExpected) basicSetupOpen = false; else finishPageWait();
@@ -290,6 +300,7 @@ public final class MainActivity extends Activity {
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 if (view != web) return;
                 entrySequence++; entryBusy = false;
+                uiPokesRefresh = false; nextUiRefreshAt = 0;
                 lastBrowserUrl = url;
                 if (!BasicNavigation.origin(url).equals(BasicNavigation.origin(pokesLink))) pokesLink = "";
                 if (pokesUrl(url)) { pokesExpected = true; basicSetupOpen = false; }
@@ -485,6 +496,7 @@ public final class MainActivity extends Activity {
         try {
             cfg.put("running", running); cfg.put("now", System.currentTimeMillis());
             cfg.put("refreshMs", (dataSaver ? Math.max(15, refreshSeconds) : refreshSeconds) * 1000); cfg.put("gapMs", gapSeconds * 1000); cfg.put("adaptive", adaptive); cfg.put("pokesExpected", pokesExpected);
+            cfg.put("allowRefresh", !basicMode || SystemClock.elapsedRealtime() >= nextUiRefreshAt);
             if (!engineReady) cfg.put("state", loopState);
         } catch (Exception error) { pageError("Settings could not be loaded. Restart the app."); return; }
         evaluating = true;
@@ -657,7 +669,7 @@ public final class MainActivity extends Activity {
     private void setRunning(boolean value) {
         loopEpoch++;
         if (!value && running && pendingPokesEntry) {
-            pendingPokesEntry = false; entryBusy = false; entryAwaiting = false; entrySequence++;
+            pendingPokesEntry = false; uiPokesRefresh = false; entryBusy = false; entryAwaiting = false; entrySequence++;
             if (!pokesUrl(currentBrowserUrl())) { pokesExpected = false; basicSetupOpen = true; }
         }
         if (value && !running) { recovery.reset(); browserRecovery.reset(); }
@@ -735,7 +747,7 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Facebook Basic mode / Basic mode plus")
             .setMessage("Use your carrier’s mobile data with Wi-Fi off.\n\nOpen Facebook here and sign in. If Facebook offers Basic mode, tap its Continue button yourself. Then tap Open Pokes and Start loop.\n\nAvailability, quota and charges are controlled by Facebook and your carrier. A banner is not billing verification. AutoPoke cannot enroll your SIM or transfer Chrome’s sign-in.")
             .setPositiveButton("Open Facebook setup", (d, w) -> {
-                setRunning(false); pendingPokesEntry = false; entryBusy = false; entrySequence++; loadDiagnostics.clear();
+                setRunning(false); pendingPokesEntry = false; uiPokesRefresh = false; entryBusy = false; entrySequence++; loadDiagnostics.clear();
                 basicMode = true; desktop = false; basicSetupOpen = true;
                 prefs.edit().putBoolean("basicMode", true).putBoolean("desktop", false).apply();
                 String target = BasicNavigation.home(currentBrowserUrl(), basicOrigin);
@@ -750,6 +762,7 @@ public final class MainActivity extends Activity {
         if (BasicNavigation.pokesLink(link)) pokesLink = BasicNavigation.pokes(link, "", basicOrigin);
     }
     private void preparePokesEntry() {
+        uiPokesRefresh = false;
         pendingPokesEntry = true; entryAwaiting = false; menuAttempted = false; entryBusy = false; entrySequence++;
     }
     private void beginBasicPokesEntry() {
@@ -760,11 +773,13 @@ public final class MainActivity extends Activity {
     }
     private void refreshPokes() {
         if (!basicMode) { openPokes(); return; }
-        // Refresh the current/learned Pokes GET, never the Home bootstrap. Keep
-        // entry inspection active in case Facebook redirects back to its menu.
-        // The existing recovery path still handles a genuinely blank response.
+        if (web == null || failed || !trusted(currentBrowserUrl())) { openPokes(); return; }
+        // Keep the already bootstrapped carrier document. Re-enter Pokes using
+        // Facebook's rendered controls; no loadUrl/reload/history replay here.
         preparePokesEntry();
-        loadBrowserTarget(pokesAddress(), true);
+        uiPokesRefresh = true; uiRefreshCycle++; nextUiRefreshAt = 0; lastUiRefreshPhase = "start";
+        finishPageWait(); whiteFrames.reset();
+        tryPokesEntry(); schedule(500); scheduleCarrier(750);
     }
     private void tryPokesEntry() {
         if (!pendingPokesEntry || !active || failed || recovering || web == null || !trusted(web.getUrl()) || entryBusy) return;
@@ -772,11 +787,16 @@ public final class MainActivity extends Activity {
         armLoadTimeout(); entryBusy = true;
         final int generation = navigation, sequence = ++entrySequence;
         final WebView current = web;
+        final boolean refreshing = uiPokesRefresh;
         JSONObject cfg = new JSONObject();
-        try { cfg.put("now", System.currentTimeMillis()); cfg.put("allowMenu", !menuAttempted); cfg.put("awaiting", entryAwaiting); }
+        try {
+            cfg.put("now", System.currentTimeMillis()); cfg.put("allowMenu", !menuAttempted); cfg.put("awaiting", entryAwaiting);
+            cfg.put("cycle", uiRefreshCycle); cfg.put("epoch", loopEpoch);
+        }
         catch (Exception ignored) { }
         String expression = "(function(){try{" + basicScript + "\n" + healthScript + "\n" + entryScript
-            + "\nreturn JSON.stringify(Object.assign(window.__autoPokeBasic.read(),window.__autoPokeEntry.open(" + cfg + ")));}catch(e){return JSON.stringify({kind:'error'});}})()";
+            + "\nreturn JSON.stringify(Object.assign(window.__autoPokeBasic.read(),window.__autoPokeEntry."
+            + (refreshing ? "refresh" : "open") + "(" + cfg + ")));}catch(e){return JSON.stringify({kind:'error'});}})()";
         current.evaluateJavascript(expression, raw -> {
             if (current != web || generation != navigation || sequence != entrySequence) return;
             entryBusy = false;
@@ -785,14 +805,30 @@ public final class MainActivity extends Activity {
                 Object decoded = new JSONTokener(raw).nextValue();
                 JSONObject result = decoded instanceof String ? new JSONObject((String) decoded) : new JSONObject();
                 String kind = result.optString("kind");
+                if (refreshing) {
+                    String phase = result.optString("phase", "unknown");
+                    lastUiRefreshPhase = phase.matches("start|back|entry|settling|done|unavailable") ? phase : "unknown";
+                }
                 updateBasicStatus(result.optString("state", "unknown"));
                 rememberPokesLink(result.optString("pokesLink", ""));
                 if ("existing".equals(kind)) {
                     rememberPokesLink(currentBrowserUrl());
+                    uiPokesRefresh = false; nextUiRefreshAt = 0;
                     pendingPokesEntry = false; entryAwaiting = false; pokesExpected = true; basicSetupOpen = false;
                     loading = false; finishPageWait(); ensureVisualReady();
                     status.setText(running ? "Pokes opened through Facebook. Watching for Poke back…" : "Pokes is ready. Tap Start loop.");
                     if (running) schedule(100);
+                } else if ("refreshing".equals(kind)) {
+                    finishPageWait(); status.setText("Updating Pokes through Facebook’s page controls…");
+                } else if ("refresh-unavailable".equals(kind)) {
+                    entryAwaiting = false; finishPageWait();
+                    nextUiRefreshAt = SystemClock.elapsedRealtime() + 30_000;
+                    if (result.optBoolean("pokes")) {
+                        uiPokesRefresh = false;
+                        pendingPokesEntry = false; pokesExpected = true; basicSetupOpen = false; loading = false;
+                        ensureVisualReady();
+                        status.setText("Keeping Pokes open and scanning. Facebook’s refresh controls are unavailable.");
+                    } else status.setText("Open Pokes inside Facebook to continue; its navigation control is not available here.");
                 } else if ("clicked".equals(kind)) {
                     entryAwaiting = true; status.setText("Opening Pokes through Facebook’s own link…");
                 } else if ("menu".equals(kind)) {
@@ -818,9 +854,12 @@ public final class MainActivity extends Activity {
         String transport = network == null ? "none" : network.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
             : network.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi" : "other/VPN";
         String category = authenticationUrl(currentBrowserUrl()) ? "sign-in" : pokesUrl(currentBrowserUrl()) ? "Pokes" : "Home/other Facebook view";
-        final String prefix = "AutoPoke 1.1.9 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
+        final String prefix = "AutoPoke 1.1.10 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
             + "\nNetwork: " + transport + "\nPage category: " + category + "\nBasic banner signal: " + lastBasicState
-            + "\nLoop running: " + running + "\nUI entry pending: " + pendingPokesEntry + "\n" + loadDiagnostics.summary() + "\n";
+            + "\nLoop running: " + running + "\nUI entry pending: " + pendingPokesEntry
+            + "\nRefresh strategy: " + (basicMode ? "Facebook page controls" : "Pokes URL")
+            + "\nUI refresh active: " + uiPokesRefresh + "\nUI refresh phase: " + lastUiRefreshPhase
+            + "\n" + loadDiagnostics.summary() + "\n";
         if (web == null) { putLoadReport(prefix + "DOM: browser unavailable"); return; }
         final int generation = navigation;
         final int reportId = ++reportSequence;
@@ -962,7 +1001,7 @@ public final class MainActivity extends Activity {
         if (web != null) web.saveState(out); super.onSaveInstanceState(out);
     }
     @Override public void onBackPressed() {
-        pendingPokesEntry = false; entryBusy = false; entryAwaiting = false; entrySequence++; finishPageWait();
+        pendingPokesEntry = false; uiPokesRefresh = false; entryBusy = false; entryAwaiting = false; entrySequence++; finishPageWait();
         if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed();
     }
     @Override protected void onDestroy() {

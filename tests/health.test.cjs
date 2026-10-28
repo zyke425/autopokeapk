@@ -18,6 +18,17 @@ async function fixture(body, url = 'https://m.facebook.com/pokes') {
 const row = '<h2>Pokes</h2><div><a href="/alex">Alex</a> poked you 1,043 times in a row <button onclick="window.clicks=(window.clicks||0)+1">Poke back</button></div>';
 const offer = '<div role="dialog"><h2>You’re out of data, but can still use Facebook</h2><button onclick="window.consents=(window.consents||0)+1">Continue</button></div>';
 
+test('client navigation recognizes a Pokes title in the site header', async () => {
+    const f = await fixture('<header><span>Pokes</span></header><h3>Friends who poked you</h3><p>No new pokes</p>', 'https://m.facebook.com/');
+    try { assert.equal((await f.inspect(start, {navigationView:true, pokesExpected:false})).pokes, true); }
+    finally { await f.context.close(); }
+});
+test('a stale Pokes URL and navigation label do not turn a Home feed into the Pokes view', async () => {
+    const f = await fixture('<header><span>Pokes</span></header><article>A friend poked you yesterday.</article>');
+    try { assert.equal((await f.inspect(start, {navigationView:true, pokesExpected:false})).pokes, false); }
+    finally { await f.context.close(); }
+});
+
 test('stopped-loop inspection detects the reported blank mobile Pokes page without sending pokes', async () => {
     const f = await fixture('');
     try {

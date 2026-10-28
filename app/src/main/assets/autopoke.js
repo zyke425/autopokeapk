@@ -161,6 +161,9 @@
             if (dirty) { value.state = JSON.parse(JSON.stringify(state)); dirty = false; }
             return value;
         };
+        const refresh = (message, extra = {}) => cfg.allowRefresh === false
+            ? result('watching', 'Keeping Pokes open and scanning. Facebook’s refresh controls will be checked again shortly.', extra)
+            : result('refresh', message, extra);
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
         if (!cfg.running || document.hidden) { readySince = 0; stalledSince = 0; blankSince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
         if (carrier.state === 'offer') {
@@ -174,7 +177,7 @@
         }
         if (pending && now - pending.sentAt >= 90000) {
             pending = null; prepared = null; readySince = 0;
-            return result('refresh', 'Refreshing Pokes; the previous attempt remains duplicate-guarded.');
+            return refresh('Refreshing Pokes; the previous attempt remains duplicate-guarded.');
         }
         const exactRoute = /(?:^|\/)pokes(?:\.php)?\/?$/.test(location.pathname);
         const expected = exactRoute || cfg.pokesExpected === true;
@@ -231,7 +234,7 @@
             const elapsed = now - pending.sentAt;
             if (elapsed >= refreshMs && !pending.inFlight && (!unchanged || elapsed >= 12000)) {
                 pending = null; readySince = 0;
-                return result('refresh', 'Refreshing Pokes after the click.', { detected: buttons.length });
+                return refresh('Refreshing Pokes after the click.', { detected: buttons.length });
             }
             return result('waiting', pending.inFlight ? 'Click attempted. Waiting for Facebook’s request to finish…' : 'Click attempted. Waiting for the row to update…', { detected: buttons.length });
         }
@@ -257,9 +260,10 @@
         // Even deferred unchanged rows refresh, so a new incoming poke can appear.
         if (!readySince) readySince = now;
         const idleDelay = cfg.adaptive === false ? refreshMs : Math.max(refreshMs, Math.min(60000, refreshMs * Math.pow(2, state.idleRounds)));
+        if (cfg.allowRefresh === false) return refresh('', {detected:buttons.length});
         if (now - readySince >= idleDelay) {
             readySince = 0; state.idleRounds = Math.min(6, state.idleRounds + 1); dirty = true;
-            return result('refresh', 'Refreshing to look for new poke backs.', { detected: buttons.length });
+            return refresh('Refreshing to look for new poke backs.', { detected: buttons.length });
         }
         return result('watching', 'Watching for an eligible Poke back. Refresh in ' + Math.ceil((idleDelay - (now - readySince)) / 1000) + 's.', { detected: buttons.length });
     }
