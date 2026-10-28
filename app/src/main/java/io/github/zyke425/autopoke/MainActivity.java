@@ -75,7 +75,9 @@ public final class MainActivity extends Activity {
     private TextView status, count, address, basicStatus;
     private Button toggle;
     private ProgressBar progress;
-    private String script, basicScript, defaultUserAgent;
+    private String script, basicScript, healthScript, defaultUserAgent;
+    private String lastBrowserUrl = "", basicOrigin = "", pokesLink = "", browserRepairUrl = "";
+    private boolean browserRepairPokes;
     private JSONObject loopState = new JSONObject();
     private boolean running, active, loading, failed, evaluating;
     private boolean keepAwake, desktop, adaptive, recovering, savingGuard;
@@ -102,6 +104,12 @@ public final class MainActivity extends Activity {
         desktop = prefs.getBoolean("desktop", false);
         dataSaver = prefs.getBoolean("dataSaver", false);
         basicMode = prefs.getBoolean("basicMode", true);
+        basicOrigin = BasicNavigation.origin(prefs.getString("basicOrigin", ""));
+        if (savedInstanceState != null) {
+            pokesExpected = savedInstanceState.getBoolean("pokesExpected", true);
+            basicSetupOpen = savedInstanceState.getBoolean("basicSetupOpen", false);
+            lastBrowserUrl = savedInstanceState.getString("lastBrowserUrl", "");
+        }
         if (basicMode) desktop = false;
         prefs.edit().putBoolean("basicMode", basicMode).remove("freeMode").apply();
         adaptive = prefs.getBoolean("adaptive", true);
@@ -114,7 +122,7 @@ public final class MainActivity extends Activity {
         for (String key : new String[]{"held", "holdReason", "holdSource", "failures", "retryAt"}) loopState.remove(key);
         prefs.edit().putString("state", loopState.toString()).apply();
         try {
-            script = readAsset("autopoke.js"); basicScript = readAsset("basic-mode.js");
+            script = readAsset("autopoke.js"); basicScript = readAsset("basic-mode.js"); healthScript = readAsset("browser-health.js");
         } catch (IOException error) {
             new AlertDialog.Builder(this).setMessage("The app's automation script could not be loaded.")
                 .setPositiveButton("Close", (d, w) -> finish()).setCancelable(false).show();
@@ -123,7 +131,7 @@ public final class MainActivity extends Activity {
         buildUi();
         renderControls();
         if (savedInstanceState == null || web.restoreState(savedInstanceState) == null || !trusted(web.getUrl())) {
-            web.loadUrl(pokesAddress());
+            web.loadUrl(pokesExpected ? pokesAddress() : BasicNavigation.home(lastBrowserUrl, basicOrigin));
         }
     }
 
@@ -163,7 +171,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.6", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.7", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -250,7 +258,10 @@ public final class MainActivity extends Activity {
                 if (!request.isForMainFrame()) return false;
                 String url = request.getUrl().toString();
                 if (trusted(url)) {
-                    if (request.hasGesture() && !pokesUrl(url)) { pokesExpected = false; finishPageWait(); }
+                    if (request.hasGesture()) {
+                        pokesExpected = pokesUrl(url);
+                        if (pokesExpected) basicSetupOpen = false; else finishPageWait();
+                    }
                     return false;
                 }
                 // Never automatically launch apps/custom schemes from Facebook content.
@@ -265,6 +276,9 @@ public final class MainActivity extends Activity {
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 if (view != web) return;
+                lastBrowserUrl = url;
+                if (!BasicNavigation.origin(url).equals(BasicNavigation.origin(pokesLink))) pokesLink = "";
+                if (pokesUrl(url)) { pokesExpected = true; basicSetupOpen = false; }
                 navigation++; evaluationSequence++; evaluating = false; savingGuard = false; loading = true; failed = false; recovering = false;
                 engineReady = false; emptyScriptResults = 0; repairingBrowser = false; browserNotice.setVisibility(View.GONE);
                 frameReady = false; clickPending = false;
@@ -319,7 +333,7 @@ public final class MainActivity extends Activity {
     private void configureRendererRecovery() {
         web.setWebViewRenderProcessClient(new WebViewRenderProcessClient() {
             @Override public void onRenderProcessUnresponsive(WebView view, WebViewRenderProcess renderer) {
-                if (view != web || !active || !running || recovering) return;
+                if (view != web || !active || recovering) return;
                 queueBrowserRecovery("The Facebook browser stopped responding.", true);
                 if (renderer != null) renderer.terminate();
             }
@@ -350,11 +364,11 @@ public final class MainActivity extends Activity {
     }
     private void armLoadTimeout() {
         cancelLoadTimeout();
-        if (!active || !running || recovering || failed || web == null || authenticationUrl(web.getUrl())
-            || !(pokesExpected || pokesUrl(web.getUrl()))) return;
+        if (!active || recovering || failed || web == null || authenticationUrl(web.getUrl())
+            || !(pokesExpected || basicSetupOpen || pokesUrl(web.getUrl()))) return;
         pageReady.start(SystemClock.elapsedRealtime());
         loadTimeout = () -> {
-            if (!active || !running || recovering || failed || web == null || !pageReady.waiting()) return;
+            if (!active || recovering || failed || web == null || !pageReady.waiting()) return;
             if (pageReady.remaining(SystemClock.elapsedRealtime()) > 0) { armLoadTimeout(); return; }
             finishPageWait();
             recoverUnrenderedPage("Facebook did not show a usable Pokes page. Retrying the mobile browser…");
@@ -374,7 +388,7 @@ public final class MainActivity extends Activity {
     }
     private void queueRecovery(String message) {
         if (recovering || web == null) return;
-        if (!running) { pageError(message + " Tap ↻ to retry."); return; }
+        if (!running) { queueBrowserRecovery(message, false); return; }
         loading = false; failed = true; evaluating = false; savingGuard = false; recovering = true;
         navigation++; evaluationSequence++; handler.removeCallbacks(poll); finishPageWait(); cancelEvaluationTimeout();
         web.stopLoading();
@@ -385,13 +399,11 @@ public final class MainActivity extends Activity {
     }
     private void queueBrowserRecovery(String message, boolean rendererLost) {
         if (recovering && repairingBrowser) return;
+        browserRepairPokes = pokesExpected || pokesUrl(lastBrowserUrl);
+        browserRepairUrl = browserRepairPokes ? pokesAddress() : BasicNavigation.home(currentBrowserUrl(), basicOrigin);
         navigation++; evaluationSequence++; evaluating = false; savingGuard = false; engineReady = false;
         handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); finishPageWait(); cancelEvaluationTimeout();
         loading = false; failed = true;
-        if (!running) {
-            recovering = false; repairingBrowser = false;
-            showBrowserNotice(message + "\nTap Open Pokes to reopen it."); return;
-        }
         if (!browserRecovery.queue(SystemClock.elapsedRealtime(), rendererLost)) {
             setRunning(false);
             showBrowserNotice("Facebook could not be restored after several attempts.\nCheck your connection, then tap Open Pokes.");
@@ -403,15 +415,18 @@ public final class MainActivity extends Activity {
     }
     private void updateRecovery() {
         handler.removeCallbacks(retryLoad);
-        if (!active || !running || !recovering) return;
+        if (!active || !recovering || (!running && !repairingBrowser)) return;
         long remaining = repairingBrowser ? browserRecovery.remaining(SystemClock.elapsedRealtime()) : recovery.remaining(SystemClock.elapsedRealtime());
         if (!hasNetwork()) status.setText("Connection unavailable. Waiting for Internet access…");
         else if (remaining > 0) status.setText(recoveryMessage + " Retrying in " + ((remaining + 999) / 1000) + "s.");
         else {
-            boolean replace = repairingBrowser && (web == null || browserRecovery.shouldRecreate());
+            boolean browserRepair = repairingBrowser;
+            boolean replace = browserRepair && (web == null || browserRecovery.shouldRecreate());
+            String target = browserRepair ? browserRepairUrl : pokesAddress();
+            boolean toPokes = !browserRepair || browserRepairPokes;
             recovering = false; repairingBrowser = false;
             if (replace) replaceBrowser();
-            openPokes(); return;
+            loadBrowserTarget(target, toPokes); return;
         }
         if (repairingBrowser) showBrowserNotice(status.getText().toString());
         handler.postDelayed(retryLoad, 1000);
@@ -510,20 +525,7 @@ public final class MainActivity extends Activity {
                 if ("stalled".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("watching".equals(kind) || "clicked".equals(kind) || "prepared".equals(kind)) {
                     pokesExpected = true; loading = false; finishPageWait(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
-                    // Bound navigation history during long sessions of redirected refreshes.
-                    if (historyChecked != navigation) {
-                        historyChecked = navigation;
-                        if (web.copyBackForwardList().getSize() > 8) web.clearHistory();
-                        final WebView current = web;
-                        final int visualGeneration = navigation;
-                        current.postVisualStateCallback(navigation, new WebView.VisualStateCallback() {
-                            @Override public void onComplete(long requestId) {
-                                if (current == web && active && visualGeneration == navigation) {
-                                    frameReady = true; current.requestLayout(); current.invalidate();
-                                }
-                            }
-                        });
-                    }
+                    ensureVisualReady();
                 }
                 if ("refresh".equals(kind)) { openPokes(); return; }
                 if ("watching".equals(kind) || "waiting".equals(kind)) checkVisibleFrame();
@@ -539,6 +541,54 @@ public final class MainActivity extends Activity {
         // Recreate before applying the compatibility agent, so changing it cannot
         // start a second load in the old document. Cookies remain in the profile.
         queueBrowserRecovery(message, !desktop);
+    }
+    private void ensureVisualReady() {
+        if (web == null || historyChecked == navigation) return;
+        historyChecked = navigation;
+        if (web.copyBackForwardList().getSize() > 8) web.clearHistory();
+        final WebView current = web;
+        final int generation = navigation;
+        current.postVisualStateCallback(generation, new WebView.VisualStateCallback() {
+            @Override public void onComplete(long requestId) {
+                if (current == web && active && generation == navigation) {
+                    frameReady = true; current.requestLayout(); current.invalidate();
+                }
+            }
+        });
+    }
+    private void handleStoppedPage(JSONObject result) {
+        if (running || !active || failed || recovering) return;
+        String kind = result.optString("kind");
+        if ("hidden".equals(kind)) {
+            // With the app focused, a hidden WebView is a rendering problem, not
+            // a reason to cancel its deadline forever. Native dialogs are handled
+            // before inspection, while they have the window focus.
+            web.onResume(); web.resumeTimers(); web.requestLayout(); web.invalidate(); armLoadTimeout();
+            status.setText("Restoring Facebook’s page visibility. The poke loop stays stopped."); return;
+        }
+        if ("login".equals(kind) || "basic-setup".equals(kind)) {
+            finishPageWait(); whiteFrames.reset(); loading = false;
+            if ("login".equals(kind)) status.setText("Sign in to Facebook, then tap Open Pokes.");
+            if ("basic-setup".equals(kind)) status.setText("Tap Continue on Facebook’s Basic mode offer when you are ready.");
+            return;
+        }
+        if (result.optBoolean("ready")) {
+            loading = false; finishPageWait(); browserNotice.setVisibility(View.GONE);
+            if (result.optBoolean("pokes")) {
+                pokesExpected = true; basicSetupOpen = false;
+                status.setText("Pokes is ready. Tap Start loop to begin.");
+            } else renderControls();
+            browserRecovery.healthy(SystemClock.elapsedRealtime());
+            ensureVisualReady(); checkVisibleFrame();
+            return;
+        }
+        if ("blank".equals(kind) || "stalled".equals(kind)) {
+            recoverUnrenderedPage("Facebook did not render. Restoring the page; the poke loop stays stopped."); return;
+        }
+        if (pokesExpected || basicSetupOpen) {
+            status.setText("Waiting for Facebook to render. Page recovery is active; no pokes are being sent.");
+            armLoadTimeout();
+        }
     }
     private void checkVisibleFrame() {
         // A compositor can show white even while DOM checks say the page is ready.
@@ -559,7 +609,7 @@ public final class MainActivity extends Activity {
                 frameProbePending = false;
                 try {
                     if (result != PixelCopy.SUCCESS || current != web || generation != navigation || !active
-                        || !running || clickPending || recovering || !hasWindowFocus()) { whiteFrames.reset(); return; }
+                        || clickPending || recovering || !hasWindowFocus()) { whiteFrames.reset(); return; }
                     int[] pixels = new int[64 * 64]; sample.getPixels(pixels, 0, 64, 0, 0, 64, 64);
                     if (whiteFrames.observe(SystemClock.elapsedRealtime(), pixels)) {
                         whiteFrames.reset(); recoverUnrenderedPage("The mobile browser kept displaying a white page.");
@@ -588,8 +638,12 @@ public final class MainActivity extends Activity {
         if (value && !running) { recovery.reset(); browserRecovery.reset(); }
         running = value; prefs.edit().putBoolean("running", running).apply();
         handler.removeCallbacks(poll);
-        if (!running) { whiteFrames.reset(); recovering = false; handler.removeCallbacks(retryLoad); finishPageWait(); }
-        renderControls(); if (running) { armLoadTimeout(); schedule(100); }
+        if (!running) {
+            whiteFrames.reset(); finishPageWait();
+            if (!repairingBrowser) { recovering = false; handler.removeCallbacks(retryLoad); }
+            scheduleCarrier(250);
+        }
+        renderControls(); armLoadTimeout(); if (running) schedule(100);
     }
     private void renderControls() {
         if (toggle == null) return;
@@ -614,18 +668,24 @@ public final class MainActivity extends Activity {
     }
     private void scheduleCarrier(long delay) {
         handler.removeCallbacks(carrierPoll);
-        if (active && basicMode && !failed && web != null && trusted(web.getUrl())) handler.postDelayed(carrierPoll, delay);
+        if (active && !failed && web != null && trusted(web.getUrl())) handler.postDelayed(carrierPoll, delay);
     }
     private void readCarrier() {
-        if (!active || !basicMode || failed || web == null || !trusted(web.getUrl())) return;
+        if (!active || failed || recovering || web == null || !trusted(web.getUrl())) return;
         // The loop already returns this passive UI signal while it is running.
         if (running) { scheduleCarrier(1500); return; }
+        if (!hasWindowFocus()) { finishPageWait(); scheduleCarrier(1500); return; }
         if (carrierReading) return;
+        armLoadTimeout();
         carrierReading = true;
         final int generation = navigation, sequence = ++carrierSequence;
         final WebView current = web;
-        String expression = "(function(){try{" + basicScript
-            + "\nreturn JSON.stringify(window.__autoPokeBasic.read());}catch(e){return JSON.stringify({state:'unknown'});}})()";
+        JSONObject cfg = new JSONObject();
+        try { cfg.put("now", System.currentTimeMillis()); cfg.put("pokesExpected", pokesExpected); cfg.put("browserExpected", basicSetupOpen || pokesExpected); }
+        catch (Exception ignored) { }
+        String expression = "(function(){try{" + basicScript + "\n" + healthScript
+            + "\nreturn JSON.stringify(Object.assign(window.__autoPokeBasic.read(),window.__autoPokeHealth.read(" + cfg
+            + "),{pokesLink:window.__autoPokeBasic.pokesLink()}));}catch(e){return JSON.stringify({state:'unknown',kind:'loading'});}})()";
         current.evaluateJavascript(expression, raw -> {
             if (current != web || generation != navigation || sequence != carrierSequence) return;
             carrierReading = false;
@@ -634,6 +694,13 @@ public final class MainActivity extends Activity {
                 Object decoded = new JSONTokener(raw).nextValue();
                 JSONObject result = decoded instanceof String ? new JSONObject((String) decoded) : new JSONObject();
                 updateBasicStatus(result.optString("state", "unknown"));
+                if ("basic".equals(result.optString("state"))) {
+                    String origin = BasicNavigation.origin(currentBrowserUrl());
+                    if (!origin.isEmpty() && !origin.equals(basicOrigin)) { basicOrigin = origin; prefs.edit().putString("basicOrigin", origin).apply(); }
+                }
+                String link = result.optString("pokesLink", "");
+                if (BasicNavigation.pokesLink(link)) pokesLink = link;
+                handleStoppedPage(result);
             } catch (Exception ignored) { updateBasicStatus("unknown"); }
             scheduleCarrier(1500);
         });
@@ -644,25 +711,30 @@ public final class MainActivity extends Activity {
             .setPositiveButton("Open Facebook setup", (d, w) -> {
                 setRunning(false); basicMode = true; desktop = false; basicSetupOpen = true;
                 prefs.edit().putBoolean("basicMode", true).putBoolean("desktop", false).apply();
-                mobileRecovery.reset(); recovery.reset(); browserRecovery.reset(); whiteFrames.reset();
-                if (web == null) createBrowser(); else applyUserAgent();
-                failed = false; recovering = false; repairingBrowser = false; pokesExpected = false;
-                handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
+                String target = BasicNavigation.home(currentBrowserUrl(), basicOrigin);
+                recovery.reset(); browserRecovery.reset(); whiteFrames.reset();
+                if (web == null) createBrowser(); else { web.stopLoading(); applyUserAgent(); }
                 renderControls(); updateBasicStatus("unknown");
-                web.loadUrl("https://www.facebook.com/");
+                loadBrowserTarget(target, false);
             }).setNegativeButton("Cancel", null).show();
     }
+    private String currentBrowserUrl() { return web != null && web.getUrl() != null ? web.getUrl() : lastBrowserUrl; }
     private void openPokes() {
-        finishPageWait(); basicSetupOpen = false;
+        String target = pokesAddress();
         if (web == null) createBrowser();
         if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
-        failed = false; recovering = false; repairingBrowser = false; pokesExpected = true; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
-        // loadUrl also reloads an identical URL, without repeatedly growing WebView history.
-        if (pokesAddress().equals(web.getUrl())) web.reload(); else web.loadUrl(pokesAddress());
-        armLoadTimeout();
+        loadBrowserTarget(target, true);
+    }
+    private void loadBrowserTarget(String target, boolean toPokes) {
+        finishPageWait(); basicSetupOpen = !toPokes; pokesExpected = toPokes;
+        if (web == null) createBrowser();
+        failed = false; recovering = false; repairingBrowser = false;
+        handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
+        // Use a fresh GET rather than re-submitting a previous form action.
+        web.loadUrl(target); armLoadTimeout(); scheduleCarrier(250);
     }
     private String pokesAddress() {
-        return mobileRecovery.address(desktop, basicMode);
+        return basicMode ? BasicNavigation.pokes(currentBrowserUrl(), pokesLink, basicOrigin) : mobileRecovery.address(desktop);
     }
     private void applyUserAgent() {
         web.setLayerType(!desktop && mobileRecovery.useSoftware() ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_NONE, null);
@@ -697,6 +769,7 @@ public final class MainActivity extends Activity {
             .setPositiveButton("Clear", (d, w) -> {
                 setRunning(false); dialog.dismiss(); navigation++; handler.removeCallbacks(poll);
                 web.stopLoading(); web.loadUrl("about:blank");
+                basicOrigin = ""; pokesLink = ""; prefs.edit().remove("basicOrigin").apply();
                 android.webkit.WebStorage.getInstance().deleteAllData(); web.clearCache(true); web.clearHistory();
                 CookieManager.getInstance().removeAllCookies(done -> { CookieManager.getInstance().flush(); openPokes(); });
             }).setNegativeButton("Cancel", null).show());
@@ -740,6 +813,8 @@ public final class MainActivity extends Activity {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();
     }
     @Override protected void onSaveInstanceState(Bundle out) {
+        out.putBoolean("pokesExpected", pokesExpected); out.putBoolean("basicSetupOpen", basicSetupOpen);
+        out.putString("lastBrowserUrl", lastBrowserUrl);
         if (web != null) web.saveState(out); super.onSaveInstanceState(out);
     }
     @Override public void onBackPressed() {

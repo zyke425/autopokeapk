@@ -71,5 +71,21 @@
         }
         return { state: 'unknown' };
     }
-    window.__autoPokeBasic = { read };
+    function pokesLink() {
+        if (location.protocol !== 'https:' || !/(^|\.)facebook\.com$/i.test(location.hostname)) return '';
+        for (const link of document.querySelectorAll('a[href]')) {
+            if (!visible(link) || text(link) !== 'pokes') continue;
+            try {
+                const url = new URL(link.getAttribute('href'), location.href);
+                if (url.protocol === 'https:' && /^(?:(?:www|m|mbasic|free)\.)?facebook\.com$/i.test(url.hostname)
+                    && !url.username && !url.password && (!url.port || url.port === '443')
+                    && /^\/pokes(?:\.php)?\/?$/.test(url.pathname)
+                    && !Array.from(url.searchParams.keys()).some(k => /^(?:poke_target|poke|target_id|uid|action|send_poke|fb_dtsg|jazoest)$/i.test(k))) {
+                    url.hash = ''; return url.href;
+                }
+            } catch (_) { }
+        }
+        return '';
+    }
+    window.__autoPokeBasic = { read, pokesLink };
 })();

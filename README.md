@@ -1,12 +1,23 @@
 # AutoPoke for Android
 
-Current APK: **1.1.6** (version code 8), Android 8.0 or newer.
+Current APK: **1.1.7** (version code 9), Android 8.0 or newer.
 
 A standalone Android app that opens Facebook in its own WebView, clicks rendered **Poke back** controls, and refreshes to find incoming pokes. Native Start/Stop and Settings controls stay above the page.
 
 **[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
 
-## Changes in 1.1.6
+## Changes in 1.1.7
+
+- Recover blank Facebook pages while the poke loop is **stopped**, including Basic mode setup and manually opened Pokes. The separate foreground inspector cannot click controls, accept consent, or create poke reservations. Browser repairs preserve the loop's OFF state.
+- Preserve the mobile Facebook host supplied by the site. Basic mode no longer forces setup/Pokes back to a fixed `www.facebook.com` address. Prefer Facebook's visible Pokes navigation link, retaining its carrier/referral parameters; otherwise use the current/last confirmed display host. New sessions default to `m.facebook.com`.
+- Reject action URLs and token-bearing action parameters as navigation targets. Repairs use fresh GET navigation rather than replaying a previous poke/form URL.
+- Recognize Pokes reached through Facebook's own menu or SPA view, so the app no longer remains in its "Finish Basic mode setup" state after entering Pokes.
+- Preserve the setup-versus-Pokes target across activity restoration. Browser replacement retains cookies and the last usable mobile presentation.
+- Check blank/hidden mobile content, delayed rendering, sign-in/OTP pages and Basic-mode consent separately. Visible manual setup/sign-in cancels recovery deadlines. Repairs retain a bounded budget; ordinary stopped-loop browsing does not refresh repeatedly.
+
+These fixes address the reported stopped-loop white page. Carrier access and Pokes availability still need confirmation on the reporting phone; the app cannot grant free data.
+
+## Earlier changes in 1.1.6
 
 - Keep Facebook visible during ordinary loading/blank-page checks. Remove the opaque in-app loading cover shown in the reported screenshot; progress stays in the native status area above Facebook. Full repair/error notices are reserved for actual recovery or failures.
 - Use one native 45-second deadline for reaching a usable Pokes view. Redirects and document-completion callbacks no longer reset or cancel it. A loaded-but-empty page cannot remain in the checking state indefinitely.
@@ -19,7 +30,7 @@ Actual free-data access and Pokes availability remain controlled by Facebook and
 ## Earlier changes in 1.1.5
 
 - Add a visible **Basic mode** setup button for Facebook's current carrier Basic mode / Basic mode plus flow, as shown on the user's Smart connection.
-- Open setup on `https://www.facebook.com/` and Pokes on the same host with the mobile layout. Replace the previous legacy `free.facebook.com` setting with a **Carrier Basic mode / Basic mode plus** profile, enabled by default. This selects the browsing profile; it does not opt in or certify free access.
+- In 1.1.5, setup and Pokes initially used the main host with mobile layout; 1.1.7 now preserves the site-provided mobile host/link. Replace the previous legacy `free.facebook.com` setting with a **Carrier Basic mode / Basic mode plus** profile, enabled by default. This selects the browsing profile; it does not opt in or certify free access.
 - Read Facebook's own visible carrier UI and report **Basic mode banner detected**, **Facebook shows Data mode**, **Basic offer: tap Continue on Facebook**, or **Basic mode: not confirmed**. Inspection works while the loop is stopped. No synthetic Facebook banner or billing confirmation is created.
 - Leave carrier consent, data purchases and mode switching to the user. An actual out-of-data offer defers poke clicks and refreshes until the user handles it; the loop then resumes. No request-error hold or saved cooldown is reintroduced.
 - Use an available cellular network in the Basic profile even if Android does not advertise general Internet capability. Do not require Android's Internet-validation probe to succeed.
@@ -48,10 +59,10 @@ Facebook and the carrier control eligibility, quota, available features and char
 ## Install and use
 
 1. Download the APK and open it on your Android phone. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
-2. Update directly from **1.1.1, 1.1.2, 1.1.4, or 1.1.5**; these builds use the same saved development signing key. Builds **1.0.0/1.1.0** require uninstalling first because their signing key was lost before 1.1.1. Uninstalling removes local sign-in and settings.
-3. Open the app and confirm the title says **AutoPoke 1.1.6**.
+2. Update directly from **1.1.1 through 1.1.6**; these builds use the same saved development signing key. Builds **1.0.0/1.1.0** require uninstalling first because their signing key was lost before 1.1.1. Uninstalling removes local sign-in and settings.
+3. Open the app and confirm the title says **AutoPoke 1.1.7**.
 4. Sign in to Facebook inside the app, tap **Open Pokes**, and tap **Start loop**. Keep the app open.
-5. Tap **Stop loop** to stop scanning and automatic refreshes.
+5. Tap **Stop loop** to stop automatic poke clicks and normal loop refreshes. Foreground blank-page recovery remains active without sending pokes.
 
 No Tampermonkey or accessibility service is needed. This app uses its own Facebook session; it does not control the separate Facebook app or Chrome.
 
@@ -65,7 +76,7 @@ No Tampermonkey or accessibility service is needed. This app uses its own Facebo
 | After a click | Wait for the current poke's observed request to settle and for the row to change. An unchanged row gets 12 seconds before refresh; an unresolved request gets at most 90 seconds. Neither response errors nor unrelated requests add a cooldown. |
 | Duplicate guard | Save a reservation before clicking. The unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. A new poke count creates a new signature. Guards and attempts survive reloads/restarts. |
 | Request errors | No automatic restriction detection, response-body inspection, request-failed countdown, or **Review pause** hold. Facebook still decides whether to accept a poke. |
-| Browser/load recovery | Blank or stuck pages and dead renderers get bounded recovery. Failed main-document loads still need connection recovery; TLS/sign-in problems require attention. The app waits while no Internet-capable network is present. Repeated unsuccessful repairs eventually pause with a visible recovery message. |
+| Browser/load recovery | Blank or stuck pages and dead renderers get bounded recovery, including during Basic setup and when the loop is stopped. Failed main-document loads still need connection recovery; TLS/sign-in problems require attention. The app waits while no Internet-capable network is present. Repeated unsuccessful repairs eventually pause with a visible recovery message. |
 | Layout | Mobile by default. Desktop layout is available when the Basic profile is off. Basic setup and mobile recovery keep the mobile user agent. |
 | Data saver | Blocks network images and reduces refresh frequency. It does not make access free, compress all traffic, or eliminate Facebook script downloads. Turn it off if sign-in requires images. |
 | Carrier Basic mode | Uses the normal Facebook mobile website and its own carrier offer/banner. The profile is on by default; its selection is not consent, enrollment, or billing verification. Use the Basic mode button for setup. |
@@ -98,7 +109,7 @@ npm test
 
 APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-The 82 browser tests use intercepted offline fixtures: no Facebook login or live pokes. They cover clicking/refreshing across repeated failed responses, old-state migration, unrelated/hung requests, duplicate guards, mobile loading and blank-page states, sign-in exclusions, adaptive timing, carrier-banner detection, manual opt-in, false-label exclusion, and continuation after setup. Twenty-one JVM tests cover recovery budgets, mobile fallback/compatibility, redirect-proof readiness deadlines, and white-frame classification/deadlines. Device-specific rendering and a live signed-in Facebook session still need testing on the reporting phone.
+The 94 browser tests use intercepted offline fixtures: no Facebook login or live pokes. They cover read-only stopped-loop blank-page checks, host/link preservation, manual setup exclusions, clicking/refreshing across repeated failed responses, old-state migration, unrelated/hung requests, duplicate guards, mobile loading and blank-page states, sign-in exclusions, adaptive timing, carrier-banner detection, manual opt-in, false-label exclusion, and continuation after setup. Twenty-six JVM tests cover recovery budgets, mobile fallback/compatibility, redirect-proof readiness deadlines, and white-frame classification/deadlines. Device-specific rendering and a live signed-in Facebook session still need testing on the reporting phone.
 
 The checked-in APK is built and signature-verified locally. GitHub Actions previously could not start because GitHub reported an account billing lock; the checked-in download is available independently of Actions. CI runs browser tests, Android compilation, unit tests and lint when runners are available. A passing `main` build publishes a development APK prerelease.
 
@@ -108,8 +119,10 @@ The private local signing backup is excluded from Git. CI uses its own debug key
 
 - `app/src/main/java/io/github/zyke425/autopoke/MainActivity.java`: native UI, WebView, lifecycle, settings, persistence and recovery integration.
 - `app/src/main/assets/autopoke.js`: visible-control detector and poke-back state machine.
+- `app/src/main/assets/browser-health.js`: read-only page health checks independent of automation.
+- `tests/health.test.cjs`: stopped-loop inspection and navigation fixtures.
 - `app/src/main/assets/basic-mode.js`: read-only inspection of Facebook carrier banners/offers; no opt-in or purchase actions.
-- `LoadRecovery.java`, `BrowserRecovery.java`, `PageReadyWatchdog.java`, `MobileRecovery.java`, `WhiteFrameWatchdog.java`: recovery policies and visual health checks.
+- `LoadRecovery.java`, `BrowserRecovery.java`, `PageReadyWatchdog.java`, `MobileRecovery.java`, `WhiteFrameWatchdog.java`, `BasicNavigation.java`: recovery policies and visual health checks.
 - `tests/engine.test.cjs`: offline browser regression tests.
 
 Adapted from the repository owner's **Facebook Autopoke GUI 2.12** userscript, which credited **augesrob (original); revised GUI and loop**. Unofficial; not affiliated with Facebook or Meta.

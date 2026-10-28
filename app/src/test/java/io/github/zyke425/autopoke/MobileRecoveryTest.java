@@ -18,17 +18,16 @@ public final class MobileRecoveryTest {
         assertFalse(recovery.useMainHost()); assertFalse(recovery.useSoftware());
         assertFalse(recovery.blank());
     }
-    @Test public void basicSetupAndPokesKeepTheMainHostAcrossRecovery() {
+    @Test public void regularMobileFallbackKeepsItsLayoutAcrossRecovery() {
         MobileRecovery recovery = new MobileRecovery();
-        assertEquals("https://m.facebook.com/pokes", recovery.address(false, false));
+        assertEquals("https://m.facebook.com/pokes", recovery.address(false));
         for (int i = 0; i < 3; i++) {
             recovery.blank();
-            assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(false, true));
-            assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(false, false));
+            assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(false));
         }
         recovery.reset();
-        assertEquals("https://m.facebook.com/pokes", recovery.address(false, false));
-        assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(true, false));
+        assertEquals("https://m.facebook.com/pokes", recovery.address(false));
+        assertEquals("https://www.facebook.com/pokes?ref=search", recovery.address(true));
     }
     @Test public void mobileCompatibilityKeepsAndroidMobileAndTheInstalledEngineVersion() {
         String installed = "Mozilla/5.0 (Linux; Android 14; Phone; wv) AppleWebKit/537.36 Version/4.0 Chrome/131.0.6778.200 Mobile Safari/537.36";

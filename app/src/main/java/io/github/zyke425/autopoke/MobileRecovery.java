@@ -16,10 +16,7 @@ final class MobileRecovery {
         String browserAgent = installedAgent.replace("; wv", "").replace("Version/4.0 ", "");
         return desktop ? browserAgent.replaceFirst("\\([^)]*\\)", "(X11; Linux x86_64)").replace(" Mobile", "") : browserAgent;
     }
-    String address(boolean desktop, boolean basicMode) {
-        // Current carrier Basic mode is offered on the normal mobile website.
-        // Keep setup and Pokes on the same host/session instead of the old free host.
-        if (basicMode) return "https://www.facebook.com/pokes?ref=search";
+    String address(boolean desktop) {
         return desktop || useMainHost() ? "https://www.facebook.com/pokes?ref=search" : "https://m.facebook.com/pokes";
     }
     void reset() { blanks = 0; }
