@@ -67,16 +67,7 @@
     }
     let state = null, pending = null, prepared = null, authorizedToken = null;
     let readySince = 0, stalledSince = 0, healthySince = 0, blankSince = 0;
-    let dirty = false, networkRestricted = null, networkError = false, networkInFlight = 0, dispatchingPoke = false;
-    const restrictionText = /rate limit(?: exceeded)?|temporarily blocked|going too fast|we limit how often/i;
-    const restrictionTitle = /^(?:(?:you(?:(?:'|’)re| are| have been)\s+)?temporarily blocked|rate limit exceeded)[.!]?$/i;
-    function restrictionNotice(el) {
-        if (!visible(el)) return false;
-        const text = normalize(el.innerText || el.textContent);
-        if (restrictionTitle.test(text)) return true;
-        if (!el.matches('[role="alert"],[role="dialog"]')) return false;
-        return /we limit how often|rate limit exceeded|you(?:(?:'|’)re| are| have been)\s+temporarily blocked|you(?:(?:'|’)re| are)\s+going too fast|misusing this feature.{0,100}going too fast/i.test(text);
-    }
+    let dirty = false, networkError = false, networkInFlight = 0, dispatchingPoke = false;
     function requestScope(body) {
         // Inspect only the friendly operation name; never retain/replay the body.
         let name = '';
@@ -92,24 +83,12 @@
         return dispatchingPoke ? 'poke' : 'unknown';
     }
     function httpResult(status, scope) {
-        if (status < 200 || status >= 300) networkError = true;
-        if (status === 429 && scope === 'poke') networkRestricted = {
-            reason: 'Facebook limited a poke request (HTTP 429).', source: 'poke-request'
-        };
+        if (scope === 'poke' && (status < 200 || status >= 300)) networkError = true;
     }
     function readErrors(value, scope) {
         if (!value || typeof value !== 'object') return;
         if (Array.isArray(value)) { value.forEach(item => readErrors(item, scope)); return; }
-        if (Array.isArray(value.errors) && value.errors.length) {
-            networkError = true;
-            const error = value.errors.find(e => e && (Number(e.code) === 1675004 || restrictionText.test(e.message || ''))
-                && (scope === 'poke' || (scope === 'unknown' && Array.isArray(e.path) && e.path.some(part => typeof part === 'string'
-                    && /^(?:poke|poke_back|send_poke|sendPoke|pokeBack|pokeMutation)$/i.test(part)))));
-            if (error) {
-                const code = Number(error.code);
-                networkRestricted = { reason: 'Facebook rejected a poke request' + (Number.isSafeInteger(code) && code > 0 ? ' (error ' + code + ')' : '') + '.', source: 'poke-request' };
-            }
-        }
+        if (scope === 'poke' && Array.isArray(value.errors) && value.errors.length) networkError = true;
         if (value.payload) readErrors(value.payload, scope);
     }
     function inspect(text, scope) {
@@ -134,17 +113,17 @@
             if (track) networkInFlight++;
             let request;
             try { request = original.apply(this, args); }
-            catch (error) { if (track) { networkInFlight--; networkError = true; } throw error; }
+            catch (error) { if (track) { networkInFlight--; if (scope === 'poke') networkError = true; } throw error; }
             return request.then(response => {
                 if (track) {
                     httpResult(response.status, scope);
                     try {
-                        response.clone().text().then(text => inspect(text, scope), () => { networkError = true; })
+                        response.clone().text().then(text => inspect(text, scope), () => { if (scope === 'poke') networkError = true; })
                             .finally(() => { networkInFlight--; });
                     } catch (_) { networkInFlight--; networkError = true; }
                 }
                 return response;
-            }, error => { if (track) { networkInFlight--; networkError = true; } throw error; });
+            }, error => { if (track) { networkInFlight--; if (scope === 'poke') networkError = true; } throw error; });
         };
     }
     if (window.XMLHttpRequest) {
@@ -176,7 +155,7 @@
         if (!state) {
             const saved = cfg.state || {};
             state = { attempts: Math.max(0, Number(saved.attempts) || 0), nextAt: Number(saved.nextAt) || 0,
-                held: saved.held === true,
+                held: false,
                 holdReason: typeof saved.holdReason === 'string' ? saved.holdReason.slice(0, 180) : 'Earlier pause; the previous version did not record its cause.',
                 holdSource: ['poke-request', 'facebook-notice', 'page-response'].includes(saved.holdSource) ? saved.holdSource : 'legacy',
                 idleRounds: Math.max(0, Math.min(6, Number(saved.idleRounds) || 0)),
@@ -192,15 +171,6 @@
         };
         if (!/^https:$/.test(location.protocol) || !/(^|\.)facebook\.com$/i.test(location.hostname)) return result('offpage', 'Open Facebook Pokes to begin.');
         if (!cfg.running || document.hidden) { readySince = 0; stalledSince = 0; blankSince = 0; return result('paused', 'Paused. Tap Start when ready.'); }
-        const restricted = () => result('restricted', 'Paused: ' + state.holdReason, { restrictionReason: state.holdReason, restrictionSource: state.holdSource });
-        if (state.held) return restricted();
-        const warning = Array.from(document.querySelectorAll('[role="alert"],[role="dialog"],h1,h2')).find(restrictionNotice);
-        if (networkRestricted || warning) {
-            state.held = true; dirty = true; pending = null; prepared = null;
-            state.holdReason = networkRestricted ? networkRestricted.reason : 'Facebook displayed an explicit block or rate-limit notice.';
-            state.holdSource = networkRestricted ? networkRestricted.source : 'facebook-notice';
-            return restricted();
-        }
         if (/^\/(?:login|checkpoint|recover|two_step_verification|auth_platform)(?:[/.]|$)/i.test(location.pathname)
             || Array.from(document.querySelectorAll('input[type="password"],input[name="email"],input[autocomplete="one-time-code"],iframe[src*="captcha"]')).some(visible)) {
             blankSince = 0;

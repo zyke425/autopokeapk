@@ -1,6 +1,6 @@
 # AutoPoke for Android
 
-Current APK: **1.1.2** (version code 4).
+Current downloadable APK: **1.1.2**. Source update: **1.1.3** (APK build pending).
 
 A standalone Android version of the supplied **Facebook Autopoke GUI 2.12** userscript. Opens Facebook in an in-app WebView and keeps the controls in Android's own UI, above the page.
 
@@ -108,3 +108,9 @@ GitHub Actions runs browser checks and Android compile/lint. A passing push to `
 - `tests/engine.test.cjs`: offline browser regression tests.
 
 The interaction flow is adapted from the userscript supplied by the repository owner, which credited **augesrob (original); revised GUI and loop**. This project is unofficial and is not affiliated with Facebook or Meta.
+
+## Source changes in 1.1.3
+
+Settings now includes Data saver (blocks network images and uses a minimum 15-second refresh) and an optional carrier Free Facebook address. Mobile layout opens m.facebook.com. Free access is unverified and depends on carrier eligibility; this app cannot provide free data. Disable Data saver when login requires images.
+
+Automatic restriction holds have been removed. Existing saved restriction flags are cleared while duplicate guards remain. Poke request failures still receive temporary backoff, and failed page loads retain bounded recovery. Facebook can still reject requests.

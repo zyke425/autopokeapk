@@ -75,6 +75,8 @@ public final class MainActivity extends Activity {
     private boolean running, active, loading, failed, evaluating;
     private boolean keepAwake, desktop, adaptive, recovering, savingGuard;
     private boolean repairingBrowser, engineReady, pokesExpected = true;
+    private boolean dataSaver;
+    private boolean freeMode;
     private int historyChecked = -1;
     private int emptyScriptResults;
     private int refreshSeconds, gapSeconds, navigation, loopEpoch, evaluationSequence;
@@ -89,12 +91,14 @@ public final class MainActivity extends Activity {
         running = prefs.getBoolean("running", false);
         keepAwake = prefs.getBoolean("keepAwake", true);
         desktop = prefs.getBoolean("desktop", false);
+        dataSaver = prefs.getBoolean("dataSaver", false);
+        freeMode = prefs.getBoolean("freeMode", false);
         adaptive = prefs.getBoolean("adaptive", true);
         refreshSeconds = clamp(prefs.getInt("refresh", 5), 1, 300);
         gapSeconds = clamp(prefs.getInt("gap", 7), 5, 300);
         try { loopState = new JSONObject(prefs.getString("state", "{}")); }
         catch (Exception ignored) { loopState = new JSONObject(); }
-        if (loopState.optBoolean("held")) running = false;
+        loopState.remove("held"); loopState.remove("holdReason"); loopState.remove("holdSource");
         try (InputStream in = getAssets().open("autopoke.js")) {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             byte[] buffer = new byte[8192]; int length;
@@ -108,7 +112,7 @@ public final class MainActivity extends Activity {
         buildUi();
         renderControls();
         if (savedInstanceState == null || web.restoreState(savedInstanceState) == null || !trusted(web.getUrl())) {
-            web.loadUrl(POKES);
+            web.loadUrl(pokesAddress());
         }
     }
 
@@ -140,7 +144,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.2", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.3", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -259,8 +263,7 @@ public final class MainActivity extends Activity {
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse response) {
                 if (view != web || !req.isForMainFrame()) return;
                 if (response.getStatusCode() == 429) {
-                    holdRestriction("Facebook limited page loads (HTTP 429).", "page-response");
-                    pageError("Facebook limited page loads (HTTP 429). Loop paused.");
+                    queueRecovery("Facebook could not load the page (HTTP 429).");
                 }
                 else if (response.getStatusCode() >= 500 && pokesUrl(req.getUrl().toString())) queueRecovery("Facebook returned a temporary server error.");
                 else pageError("Facebook returned an error. Check the page, then tap ↻.");
@@ -401,7 +404,7 @@ public final class MainActivity extends Activity {
         JSONObject cfg = new JSONObject();
         try {
             cfg.put("running", running); cfg.put("now", System.currentTimeMillis());
-            cfg.put("refreshMs", refreshSeconds * 1000); cfg.put("gapMs", gapSeconds * 1000); cfg.put("adaptive", adaptive); cfg.put("pokesExpected", pokesExpected);
+            cfg.put("refreshMs", (dataSaver ? Math.max(15, refreshSeconds) : refreshSeconds) * 1000); cfg.put("gapMs", gapSeconds * 1000); cfg.put("adaptive", adaptive); cfg.put("pokesExpected", pokesExpected);
             if (!engineReady) cfg.put("state", loopState);
         } catch (Exception error) { pageError("Settings could not be loaded. Restart the app."); return; }
         evaluating = true;
@@ -542,9 +545,11 @@ public final class MainActivity extends Activity {
         if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
         failed = false; recovering = false; repairingBrowser = false; pokesExpected = true; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad);
         // loadUrl also reloads an identical URL, without repeatedly growing WebView history.
-        if (POKES.equals(web.getUrl())) web.reload(); else web.loadUrl(POKES);
+        if (pokesAddress().equals(web.getUrl())) web.reload(); else web.loadUrl(pokesAddress());
     }
+    private String pokesAddress() { return freeMode ? "https://free.facebook.com/pokes" : desktop ? POKES : "https://m.facebook.com/pokes"; }
     private void applyUserAgent() {
+        web.getSettings().setBlockNetworkImage(dataSaver);
         if (desktop) {
             // Use the installed WebView's own Chrome version rather than a stale fixed UA.
             web.getSettings().setUserAgentString(defaultUserAgent.replaceFirst("\\([^)]*\\)", "(X11; Linux x86_64)")
@@ -561,6 +566,9 @@ public final class MainActivity extends Activity {
         LinearLayout form = column(); form.setPadding(dp(20), dp(8), dp(20), dp(12));
         EditText refresh = number(form, "Refresh delay after page is ready (1–300 seconds)", refreshSeconds);
         EditText gap = number(form, "Minimum time between clicks (5–300 seconds)", gapSeconds);
+        CheckBox saver = new CheckBox(this); saver.setText("Data saver: block images, refresh at least every 15s"); saver.setChecked(dataSaver); form.addView(saver);
+        CheckBox free = new CheckBox(this); free.setText("Try carrier Free Facebook (access unverified)"); free.setChecked(freeMode); form.addView(free);
+        TextView freeInfo = text("Free access depends on your SIM/carrier. This app cannot provide free data. Turn off Data saver if login images are needed.", 12, MUTED); form.addView(freeInfo);
         CheckBox awake = new CheckBox(this); awake.setText("Keep screen awake while running"); awake.setChecked(keepAwake); form.addView(awake);
         CheckBox desktopBox = new CheckBox(this); desktopBox.setText("Desktop Facebook layout"); desktopBox.setChecked(desktop); form.addView(desktopBox);
         CheckBox adaptiveBox = new CheckBox(this); adaptiveBox.setText("Increase refresh delay when idle"); adaptiveBox.setChecked(adaptive); form.addView(adaptiveBox);
@@ -584,7 +592,9 @@ public final class MainActivity extends Activity {
                 int nextGap = Integer.parseInt(gap.getText().toString().trim());
                 if (nextRefresh < 1 || nextRefresh > 300) { refresh.setError("Enter 1 to 300"); return; }
                 if (nextGap < 5 || nextGap > 300) { gap.setError("Enter 5 to 300"); return; }
-                boolean layoutChanged = desktop != desktopBox.isChecked();
+                boolean layoutChanged = desktop != desktopBox.isChecked() || dataSaver != saver.isChecked() || freeMode != free.isChecked();
+                dataSaver = saver.isChecked(); freeMode = free.isChecked();
+                prefs.edit().putBoolean("dataSaver", dataSaver).putBoolean("freeMode", freeMode).apply();
                 refreshSeconds = nextRefresh; gapSeconds = nextGap; keepAwake = awake.isChecked(); desktop = desktopBox.isChecked(); adaptive = adaptiveBox.isChecked();
                 prefs.edit().putInt("refresh", nextRefresh).putInt("gap", nextGap).putBoolean("keepAwake", keepAwake).putBoolean("desktop", desktop).putBoolean("adaptive", adaptive).apply();
                 renderControls(); dialog.dismiss();
