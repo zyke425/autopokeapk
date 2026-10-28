@@ -1,14 +1,13 @@
-AutoPoke 1.1.7 — recover Basic mode white pages before Start is pressed.
+AutoPoke 1.1.8 — use Facebook's own client-side Pokes navigation and add load diagnostics.
 
-Install over the locally signed 1.1.1–1.1.6 APK. Confirm the title says AutoPoke 1.1.7.
+Install over the locally signed 1.1.1–1.1.7 APK. Confirm the title says AutoPoke 1.1.8.
 
-- Monitor and repair blank pages while the poke loop is stopped, including Basic setup and manual Pokes navigation. Repairs never turn the loop on or click Poke back, Continue or Buy data.
-- Preserve Facebook's mobile host and its visible Pokes link, including carrier/referral parameters. Stop forcing the main host during Basic navigation.
-- Restore the correct setup/Pokes page after browser replacement or activity recreation. Keep cookies, click guards and the working mobile presentation.
-- Reject action URLs as navigation targets, and use fresh GET navigation rather than resubmitting a form.
-- Recognize Facebook menu/SPA Pokes navigation and update the stale setup status.
-- Retain manual sign-in/OTP/Basic consent exclusions, bounded retries and removal of request-failed countdowns.
+- Basic mode opens Home first, then clicks Facebook's visible Pokes link/control, preserving its client-side handler.
+- Use the same entry path after Basic-mode refresh, browser repair and activity recreation. Avoid reloading the same empty deep link.
+- Try the visible Menu once if necessary. If Pokes is not available, ask the user to navigate inside Facebook rather than guessing another endpoint.
+- Leave sign-in, Basic consent, Buy data and Poke back untouched during navigation. The existing poke loop starts only when enabled and the actual Pokes view is ready.
+- Add Settings → Copy load report: error codes, failed resource counts, software versions/network type and DOM counts only. Never include URLs, text, cookies, tokens or request/response bodies; no automatic upload.
 
-For Basic mode: use your supported SIM's mobile data with Wi-Fi off, open Basic mode setup, and accept Facebook's own offer if shown. Then use Open Pokes → Start loop.
+103 offline browser tests include a reproduction where direct GET /pokes is blank but Facebook's client router works. 29 JVM tests plus Android build/lint and APK signature are checked.
 
-94 offline browser tests, 26 JVM tests, Android compilation/lint and APK signature are checked before publication. Live carrier access and device rendering need confirmation on the phone. Facebook/your carrier must offer Basic mode and Pokes; the app cannot grant free data or force a poke to be accepted.
+This does not establish live Smart Basic-mode support. If it is still blank, compare Pokes in Chrome on the same connection and paste the new load report. Facebook/carrier access cannot be granted by the APK.

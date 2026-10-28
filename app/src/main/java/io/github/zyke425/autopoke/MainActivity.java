@@ -5,6 +5,8 @@ import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Bitmap;
@@ -68,6 +70,7 @@ public final class MainActivity extends Activity {
     private final MobileRecovery mobileRecovery = new MobileRecovery();
     private final WhiteFrameWatchdog whiteFrames = new WhiteFrameWatchdog();
     private final PageReadyWatchdog pageReady = new PageReadyWatchdog();
+    private final LoadDiagnostics loadDiagnostics = new LoadDiagnostics();
     private WebView web;
     private FrameLayout browserHost;
     private TextView browserNotice;
@@ -75,9 +78,13 @@ public final class MainActivity extends Activity {
     private TextView status, count, address, basicStatus;
     private Button toggle;
     private ProgressBar progress;
-    private String script, basicScript, healthScript, defaultUserAgent;
+    private String script, basicScript, healthScript, entryScript, defaultUserAgent;
     private String lastBrowserUrl = "", basicOrigin = "", pokesLink = "", browserRepairUrl = "";
     private boolean browserRepairPokes;
+    private boolean pendingPokesEntry, entryBusy, entryAwaiting, menuAttempted;
+    private int entrySequence;
+    private int reportSequence;
+    private String lastBasicState = "unknown";
     private JSONObject loopState = new JSONObject();
     private boolean running, active, loading, failed, evaluating;
     private boolean keepAwake, desktop, adaptive, recovering, savingGuard;
@@ -109,6 +116,7 @@ public final class MainActivity extends Activity {
             pokesExpected = savedInstanceState.getBoolean("pokesExpected", true);
             basicSetupOpen = savedInstanceState.getBoolean("basicSetupOpen", false);
             lastBrowserUrl = savedInstanceState.getString("lastBrowserUrl", "");
+            pendingPokesEntry = savedInstanceState.getBoolean("pendingPokesEntry", false);
         }
         if (basicMode) desktop = false;
         prefs.edit().putBoolean("basicMode", basicMode).remove("freeMode").apply();
@@ -122,7 +130,7 @@ public final class MainActivity extends Activity {
         for (String key : new String[]{"held", "holdReason", "holdSource", "failures", "retryAt"}) loopState.remove(key);
         prefs.edit().putString("state", loopState.toString()).apply();
         try {
-            script = readAsset("autopoke.js"); basicScript = readAsset("basic-mode.js"); healthScript = readAsset("browser-health.js");
+            script = readAsset("autopoke.js"); basicScript = readAsset("basic-mode.js"); healthScript = readAsset("browser-health.js"); entryScript = readAsset("basic-entry.js");
         } catch (IOException error) {
             new AlertDialog.Builder(this).setMessage("The app's automation script could not be loaded.")
                 .setPositiveButton("Close", (d, w) -> finish()).setCancelable(false).show();
@@ -130,9 +138,9 @@ public final class MainActivity extends Activity {
         }
         buildUi();
         renderControls();
-        if (savedInstanceState == null || web.restoreState(savedInstanceState) == null || !trusted(web.getUrl())) {
+        if (basicMode && pokesExpected) beginBasicPokesEntry();
+        else if (savedInstanceState == null || web.restoreState(savedInstanceState) == null || !trusted(web.getUrl()))
             web.loadUrl(pokesExpected ? pokesAddress() : BasicNavigation.home(lastBrowserUrl, basicOrigin));
-        }
     }
 
     private String readAsset(String name) throws IOException {
@@ -171,7 +179,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.7", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.8", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -186,7 +194,7 @@ public final class MainActivity extends Activity {
         toggle.setOnClickListener(v -> toggleLoop()); actions.addView(toggle, weighted());
         Button open = button("Open Pokes", Color.rgb(35, 50, 69), Color.WHITE);
         LinearLayout.LayoutParams openParams = weighted(); openParams.leftMargin = dp(8);
-        open.setOnClickListener(v -> { recovery.reset(); browserRecovery.reset(); openPokes(); }); actions.addView(open, openParams); panel.addView(actions);
+        open.setOnClickListener(v -> { loadDiagnostics.clear(); recovery.reset(); browserRecovery.reset(); openPokes(); }); actions.addView(open, openParams); panel.addView(actions);
         LinearLayout modeBar = new LinearLayout(this); modeBar.setGravity(Gravity.CENTER_VERTICAL);
         basicStatus = text("Basic mode: checking Facebook…", 11, MUTED); basicStatus.setMaxLines(2);
         modeBar.addView(basicStatus, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -276,6 +284,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 if (view != web) return;
+                entrySequence++; entryBusy = false;
                 lastBrowserUrl = url;
                 if (!BasicNavigation.origin(url).equals(BasicNavigation.origin(pokesLink))) pokesLink = "";
                 if (pokesUrl(url)) { pokesExpected = true; basicSetupOpen = false; }
@@ -300,7 +309,9 @@ public final class MainActivity extends Activity {
                 if (!failed && active && trusted(url)) { schedule(250); scheduleCarrier(250); }
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError error) {
-                if (view != web || !req.isForMainFrame() || failed) return;
+                if (view != web) return;
+                loadDiagnostics.network(req.getUrl().toString(), req.isForMainFrame(), error.getErrorCode());
+                if (!req.isForMainFrame() || failed) return;
                 int code = error.getErrorCode();
                 if ((pokesUrl(req.getUrl().toString()) || pokesExpected) && code != ERROR_FAILED_SSL_HANDSHAKE
                     && code != ERROR_UNSUPPORTED_SCHEME && code != ERROR_AUTHENTICATION && code != ERROR_BAD_URL) {
@@ -308,7 +319,9 @@ public final class MainActivity extends Activity {
                 } else pageError("Could not load Facebook. Check the page, then tap ↻.");
             }
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse response) {
-                if (view != web || !req.isForMainFrame()) return;
+                if (view != web) return;
+                loadDiagnostics.http(req.getUrl().toString(), req.isForMainFrame(), response.getStatusCode());
+                if (!req.isForMainFrame()) return;
                 if (response.getStatusCode() == 429) {
                     queueRecovery("Facebook could not load the page (HTTP 429).");
                 }
@@ -365,7 +378,7 @@ public final class MainActivity extends Activity {
     private void armLoadTimeout() {
         cancelLoadTimeout();
         if (!active || recovering || failed || web == null || authenticationUrl(web.getUrl())
-            || !(pokesExpected || basicSetupOpen || pokesUrl(web.getUrl()))) return;
+            || !(pokesExpected || basicSetupOpen || pendingPokesEntry || pokesUrl(web.getUrl()))) return;
         pageReady.start(SystemClock.elapsedRealtime());
         loadTimeout = () -> {
             if (!active || recovering || failed || web == null || !pageReady.waiting()) return;
@@ -399,7 +412,7 @@ public final class MainActivity extends Activity {
     }
     private void queueBrowserRecovery(String message, boolean rendererLost) {
         if (recovering && repairingBrowser) return;
-        browserRepairPokes = pokesExpected || pokesUrl(lastBrowserUrl);
+        browserRepairPokes = pendingPokesEntry || pokesExpected || pokesUrl(lastBrowserUrl);
         browserRepairUrl = browserRepairPokes ? pokesAddress() : BasicNavigation.home(currentBrowserUrl(), basicOrigin);
         navigation++; evaluationSequence++; evaluating = false; savingGuard = false; engineReady = false;
         handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); finishPageWait(); cancelEvaluationTimeout();
@@ -426,7 +439,8 @@ public final class MainActivity extends Activity {
             boolean toPokes = !browserRepair || browserRepairPokes;
             recovering = false; repairingBrowser = false;
             if (replace) replaceBrowser();
-            loadBrowserTarget(target, toPokes); return;
+            if (basicMode && toPokes) beginBasicPokesEntry(); else loadBrowserTarget(target, toPokes);
+            return;
         }
         if (repairingBrowser) showBrowserNotice(status.getText().toString());
         handler.postDelayed(retryLoad, 1000);
@@ -452,6 +466,7 @@ public final class MainActivity extends Activity {
     }
     private void scan() {
         if (!active || failed || web == null || evaluating || savingGuard || !trusted(web.getUrl())) return;
+        if (pendingPokesEntry) { tryPokesEntry(); schedule(500); return; }
         if (!running) { renderControls(); return; }
         if (!hasNetwork()) { status.setText("Connection unavailable. Waiting for Internet access…"); schedule(1000); return; }
         evaluateEngine(null);
@@ -527,7 +542,7 @@ public final class MainActivity extends Activity {
                     pokesExpected = true; loading = false; finishPageWait(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
                     ensureVisualReady();
                 }
-                if ("refresh".equals(kind)) { openPokes(); return; }
+                if ("refresh".equals(kind)) { if (basicMode) beginBasicPokesEntry(); else openPokes(); return; }
                 if ("watching".equals(kind) || "waiting".equals(kind)) checkVisibleFrame();
                 else whiteFrames.reset();
             } catch (Exception error) {
@@ -635,6 +650,10 @@ public final class MainActivity extends Activity {
     }
     private void setRunning(boolean value) {
         loopEpoch++;
+        if (!value && running && pendingPokesEntry) {
+            pendingPokesEntry = false; entryBusy = false; entryAwaiting = false; entrySequence++;
+            if (!pokesUrl(currentBrowserUrl())) { pokesExpected = false; basicSetupOpen = true; }
+        }
         if (value && !running) { recovery.reset(); browserRecovery.reset(); }
         running = value; prefs.edit().putBoolean("running", running).apply();
         handler.removeCallbacks(poll);
@@ -657,6 +676,7 @@ public final class MainActivity extends Activity {
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
     private void updateBasicStatus(String state) {
+        lastBasicState = state.matches("basic|data|offer|unknown") ? state : "unknown";
         if (basicStatus == null) return;
         if (!basicMode) { basicStatus.setText("Basic mode profile: off"); return; }
         switch (state) {
@@ -672,6 +692,7 @@ public final class MainActivity extends Activity {
     }
     private void readCarrier() {
         if (!active || failed || recovering || web == null || !trusted(web.getUrl())) return;
+        if (pendingPokesEntry) { tryPokesEntry(); scheduleCarrier(750); return; }
         // The loop already returns this passive UI signal while it is running.
         if (running) { scheduleCarrier(1500); return; }
         if (!hasWindowFocus()) { finishPageWait(); scheduleCarrier(1500); return; }
@@ -709,7 +730,8 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Facebook Basic mode / Basic mode plus")
             .setMessage("Use your carrier’s mobile data with Wi-Fi off.\n\nOpen Facebook here and sign in. If Facebook offers Basic mode, tap its Continue button yourself. Then tap Open Pokes and Start loop.\n\nAvailability, quota and charges are controlled by Facebook and your carrier. A banner is not billing verification. AutoPoke cannot enroll your SIM or transfer Chrome’s sign-in.")
             .setPositiveButton("Open Facebook setup", (d, w) -> {
-                setRunning(false); basicMode = true; desktop = false; basicSetupOpen = true;
+                setRunning(false); pendingPokesEntry = false; entryBusy = false; entrySequence++; loadDiagnostics.clear();
+                basicMode = true; desktop = false; basicSetupOpen = true;
                 prefs.edit().putBoolean("basicMode", true).putBoolean("desktop", false).apply();
                 String target = BasicNavigation.home(currentBrowserUrl(), basicOrigin);
                 recovery.reset(); browserRecovery.reset(); whiteFrames.reset();
@@ -719,7 +741,103 @@ public final class MainActivity extends Activity {
             }).setNegativeButton("Cancel", null).show();
     }
     private String currentBrowserUrl() { return web != null && web.getUrl() != null ? web.getUrl() : lastBrowserUrl; }
+    private void beginBasicPokesEntry() {
+        pendingPokesEntry = true; entryAwaiting = false; menuAttempted = false; entryBusy = false; entrySequence++;
+        // Bootstrap the carrier's Home document before following Facebook's UI.
+        // Do not turn a client-side navigation link into a fresh deep-link GET.
+        loadBrowserTarget(BasicNavigation.home(currentBrowserUrl(), basicOrigin), true);
+    }
+    private void tryPokesEntry() {
+        if (!pendingPokesEntry || !active || failed || recovering || web == null || !trusted(web.getUrl()) || entryBusy) return;
+        if (!hasWindowFocus()) { finishPageWait(); return; }
+        armLoadTimeout(); entryBusy = true;
+        final int generation = navigation, sequence = ++entrySequence;
+        final WebView current = web;
+        JSONObject cfg = new JSONObject();
+        try { cfg.put("now", System.currentTimeMillis()); cfg.put("allowMenu", !menuAttempted); cfg.put("awaiting", entryAwaiting); }
+        catch (Exception ignored) { }
+        String expression = "(function(){try{" + basicScript + "\n" + healthScript + "\n" + entryScript
+            + "\nreturn JSON.stringify(Object.assign(window.__autoPokeBasic.read(),window.__autoPokeEntry.open(" + cfg + ")));}catch(e){return JSON.stringify({kind:'error'});}})()";
+        current.evaluateJavascript(expression, raw -> {
+            if (current != web || generation != navigation || sequence != entrySequence) return;
+            entryBusy = false;
+            if (!active || !pendingPokesEntry) return;
+            try {
+                Object decoded = new JSONTokener(raw).nextValue();
+                JSONObject result = decoded instanceof String ? new JSONObject((String) decoded) : new JSONObject();
+                String kind = result.optString("kind");
+                updateBasicStatus(result.optString("state", "unknown"));
+                if ("existing".equals(kind)) {
+                    pendingPokesEntry = false; entryAwaiting = false; pokesExpected = true; basicSetupOpen = false;
+                    loading = false; finishPageWait(); ensureVisualReady();
+                    status.setText(running ? "Pokes opened through Facebook. Watching for Poke back…" : "Pokes is ready. Tap Start loop.");
+                    if (running) schedule(100);
+                } else if ("clicked".equals(kind)) {
+                    entryAwaiting = true; status.setText("Opening Pokes through Facebook’s own link…");
+                } else if ("menu".equals(kind)) {
+                    menuAttempted = true; status.setText("Facebook menu opened. Looking for Pokes…");
+                } else if ("login".equals(kind) || "basic-setup".equals(kind)) {
+                    finishPageWait(); status.setText("login".equals(kind) ? "Sign in to Facebook to continue."
+                        : "Tap Continue on Facebook’s Basic mode offer yourself.");
+                } else if ("missing".equals(kind)) {
+                    finishPageWait(); status.setText("Facebook loaded. Open Menu → Pokes inside Facebook; a Pokes link is not visible here.");
+                } else if ("blank".equals(kind) || "stalled".equals(kind)) {
+                    recoverUnrenderedPage("Facebook’s page stayed empty. Load details are available in Settings."); return;
+                } else status.setText("Waiting for Facebook’s Home/Pokes view. No data-mode switch is being made.");
+            } catch (Exception ignored) { status.setText("Facebook navigation returned no usable result. Check the load report in Settings."); }
+            scheduleCarrier(750); if (running) schedule(500);
+        });
+    }
+    private void copyLoadReport() {
+        String version = "unknown";
+        android.content.pm.PackageInfo info = WebView.getCurrentWebViewPackage();
+        if (info != null) version = info.versionName;
+        ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        NetworkCapabilities network = manager == null ? null : manager.getNetworkCapabilities(manager.getActiveNetwork());
+        String transport = network == null ? "none" : network.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
+            : network.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi" : "other/VPN";
+        String category = authenticationUrl(currentBrowserUrl()) ? "sign-in" : pokesUrl(currentBrowserUrl()) ? "Pokes" : "Home/other Facebook view";
+        final String prefix = "AutoPoke 1.1.8 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
+            + "\nNetwork: " + transport + "\nPage category: " + category + "\nBasic banner signal: " + lastBasicState
+            + "\nLoop running: " + running + "\nUI entry pending: " + pendingPokesEntry + "\n" + loadDiagnostics.summary() + "\n";
+        if (web == null) { putLoadReport(prefix + "DOM: browser unavailable"); return; }
+        final int generation = navigation;
+        final int reportId = ++reportSequence;
+        Runnable timeout = () -> {
+            if (reportId == reportSequence) { reportSequence++; putLoadReport(prefix + "DOM: browser did not answer within 5 seconds"); }
+        };
+        handler.postDelayed(timeout, 5000);
+        web.evaluateJavascript("(function(){try{" + healthScript + "\nreturn JSON.stringify(window.__autoPokeHealth.diagnostics());}catch(e){return '{}';}})()", raw -> {
+            if (reportId != reportSequence) return;
+            handler.removeCallbacks(timeout);
+            String sample = "DOM: sample unavailable";
+            try {
+                Object decoded = new JSONTokener(raw).nextValue();
+                if (generation == navigation && decoded instanceof String) {
+                    JSONObject rawCounts = new JSONObject((String) decoded), safeCounts = new JSONObject();
+                    String state = rawCounts.optString("documentState", "unknown");
+                    safeCounts.put("documentState", state.matches("loading|interactive|complete") ? state : "unknown");
+                    for (String key : new String[]{"htmlCharacters", "bodyElements", "textCharacters", "scriptElements", "frames", "navigationBodyBytes"})
+                        safeCounts.put(key, Math.max(-1L, Math.min(100_000_000L, rawCounts.optLong(key, -1))));
+                    sample = "DOM counts: " + safeCounts;
+                }
+            } catch (Exception ignored) { }
+            putLoadReport(prefix + sample);
+        });
+    }
+    private void putLoadReport(String report) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) return;
+        clipboard.setPrimaryClip(ClipData.newPlainText("AutoPoke load report", report));
+        Toast.makeText(this, "Load report copied. Paste it when reporting the blank page.", Toast.LENGTH_LONG).show();
+    }
     private void openPokes() {
+        if (basicMode) {
+            pendingPokesEntry = true; entryAwaiting = false; menuAttempted = false;
+            if (web == null || failed || loading || !trusted(currentBrowserUrl()) || pokesUrl(currentBrowserUrl())) beginBasicPokesEntry();
+            else { tryPokesEntry(); scheduleCarrier(250); }
+            return;
+        }
         String target = pokesAddress();
         if (web == null) createBrowser();
         if (running && !hasNetwork()) { queueRecovery("Internet access is unavailable."); return; }
@@ -760,6 +878,9 @@ public final class MainActivity extends Activity {
         CheckBox adaptiveBox = new CheckBox(this); adaptiveBox.setText("Increase refresh delay when idle"); adaptiveBox.setChecked(adaptive); form.addView(adaptiveBox);
         TextView info = text("Only Poke back is clicked. A click is an attempt, not confirmation. The loop pauses while the app is hidden and resumes when you return. Facebook sign-in and cookies stay in this app's WebView.", 12, MUTED);
         info.setPadding(0, dp(8), 0, dp(12)); form.addView(info);
+        Button report = button("Copy load report", Color.rgb(35, 50, 69), Color.WHITE);
+        report.setOnClickListener(v -> copyLoadReport()); form.addView(report);
+        TextView reportInfo = text("If Pokes stays blank, share this report. It contains load errors and page counts, not page text, cookies or tokens.", 12, MUTED); form.addView(reportInfo);
         Button logout = button("Sign out / clear Facebook data", Color.rgb(35, 50, 69), Color.WHITE); form.addView(logout);
         ScrollView scroll = new ScrollView(this); scroll.addView(form);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Loop settings").setView(scroll)
@@ -807,17 +928,20 @@ public final class MainActivity extends Activity {
         }
     }
     @Override protected void onPause() {
+        entrySequence++; entryBusy = false;
         whiteFrames.reset(); carrierSequence++; carrierReading = false; handler.removeCallbacks(carrierPoll);
         active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); finishPageWait(); cancelEvaluationTimeout();
         if (web != null) { web.onPause(); web.pauseTimers(); CookieManager.getInstance().flush(); }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();
     }
     @Override protected void onSaveInstanceState(Bundle out) {
+        out.putBoolean("pendingPokesEntry", pendingPokesEntry);
         out.putBoolean("pokesExpected", pokesExpected); out.putBoolean("basicSetupOpen", basicSetupOpen);
         out.putString("lastBrowserUrl", lastBrowserUrl);
         if (web != null) web.saveState(out); super.onSaveInstanceState(out);
     }
     @Override public void onBackPressed() {
+        pendingPokesEntry = false; entryBusy = false; entryAwaiting = false; entrySequence++; finishPageWait();
         if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed();
     }
     @Override protected void onDestroy() {

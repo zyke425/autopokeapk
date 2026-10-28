@@ -63,5 +63,17 @@
         stalledSince = 0;
         return result('content', true);
     }
-    window.__autoPokeHealth = { read };
+    function diagnostics() {
+        const navigation = performance.getEntriesByType('navigation')[0];
+        return {
+            documentState: document.readyState,
+            htmlCharacters: document.documentElement ? document.documentElement.outerHTML.length : 0,
+            bodyElements: document.body ? document.body.childElementCount : 0,
+            textCharacters: document.body ? document.body.innerText.length : 0,
+            scriptElements: document.scripts.length,
+            frames: document.querySelectorAll('iframe').length,
+            navigationBodyBytes: navigation && Number.isFinite(navigation.encodedBodySize) ? navigation.encodedBodySize : -1
+        };
+    }
+    window.__autoPokeHealth = { read, diagnostics };
 })();
