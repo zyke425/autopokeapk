@@ -105,3 +105,14 @@ test('a Pokes navigation badge does not hide the client-side entry control', asy
     try { assert.equal((await f.open()).kind, 'clicked'); assert.equal((await f.open({awaiting:true})).kind, 'existing'); assert.equal(f.deepLoads(), 0); }
     finally { await f.context.close(); }
 });
+test('a client-only Pokes view retains the site link when its URL still says Home', async () => {
+    const f = await fixture(home.replace("history.pushState({},'',this.href);", ''));
+    try {
+        const entry = await f.open();
+        assert.equal(entry.kind, 'clicked');
+        assert.equal(entry.pokesLink, 'https://m.facebook.com/pokes?ref=menu&zero=carrier');
+        assert.equal(f.page.url(), 'https://m.facebook.com/');
+        assert.equal((await f.open({awaiting:true})).kind, 'existing');
+        assert.equal(f.deepLoads(), 0);
+    } finally { await f.context.close(); }
+});

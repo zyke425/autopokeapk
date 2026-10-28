@@ -179,7 +179,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.8", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.9", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -206,7 +206,12 @@ public final class MainActivity extends Activity {
         address = text("facebook.com · secure connection", 11, MUTED); address.setSingleLine(true);
         browserBar.addView(address, new LinearLayout.LayoutParams(0, dp(40), 1)); address.setGravity(Gravity.CENTER_VERTICAL);
         Button reload = button("↻", Color.TRANSPARENT, MINT); reload.setContentDescription("Reload Facebook page");
-        reload.setOnClickListener(v -> { recovery.reset(); browserRecovery.reset(); if (web != null) { finishPageWait(); failed = false; web.reload(); } else openPokes(); });
+        reload.setOnClickListener(v -> {
+            recovery.reset(); browserRecovery.reset();
+            if (basicMode && pokesExpected && !pendingPokesEntry && !basicSetupOpen) refreshPokes();
+            else if (web != null) { finishPageWait(); failed = false; web.reload(); }
+            else openPokes();
+        });
         browserBar.addView(reload, new LinearLayout.LayoutParams(dp(48), dp(44))); root.addView(browserBar);
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         root.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
@@ -502,7 +507,7 @@ public final class MainActivity extends Activity {
                 JSONObject result = new JSONObject((String) decoded);
                 String kind = result.optString("kind");
                 clickPending = result.optBoolean("requestPending");
-                if (result.optBoolean("ready")) { loading = false; finishPageWait(); }
+                if (result.optBoolean("ready")) { rememberPokesLink(currentBrowserUrl()); loading = false; finishPageWait(); }
                 if (basicMode) updateBasicStatus(result.optString("basicState", "unknown"));
                 if ("reinject".equals(kind)) { engineReady = false; schedule(250); return; }
                 engineReady = true;
@@ -542,7 +547,7 @@ public final class MainActivity extends Activity {
                     pokesExpected = true; loading = false; finishPageWait(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
                     ensureVisualReady();
                 }
-                if ("refresh".equals(kind)) { if (basicMode) beginBasicPokesEntry(); else openPokes(); return; }
+                if ("refresh".equals(kind)) { refreshPokes(); return; }
                 if ("watching".equals(kind) || "waiting".equals(kind)) checkVisibleFrame();
                 else whiteFrames.reset();
             } catch (Exception error) {
@@ -590,6 +595,7 @@ public final class MainActivity extends Activity {
         if (result.optBoolean("ready")) {
             loading = false; finishPageWait(); browserNotice.setVisibility(View.GONE);
             if (result.optBoolean("pokes")) {
+                rememberPokesLink(currentBrowserUrl());
                 pokesExpected = true; basicSetupOpen = false;
                 status.setText("Pokes is ready. Tap Start loop to begin.");
             } else renderControls();
@@ -719,8 +725,7 @@ public final class MainActivity extends Activity {
                     String origin = BasicNavigation.origin(currentBrowserUrl());
                     if (!origin.isEmpty() && !origin.equals(basicOrigin)) { basicOrigin = origin; prefs.edit().putString("basicOrigin", origin).apply(); }
                 }
-                String link = result.optString("pokesLink", "");
-                if (BasicNavigation.pokesLink(link)) pokesLink = link;
+                rememberPokesLink(result.optString("pokesLink", ""));
                 handleStoppedPage(result);
             } catch (Exception ignored) { updateBasicStatus("unknown"); }
             scheduleCarrier(1500);
@@ -741,11 +746,25 @@ public final class MainActivity extends Activity {
             }).setNegativeButton("Cancel", null).show();
     }
     private String currentBrowserUrl() { return web != null && web.getUrl() != null ? web.getUrl() : lastBrowserUrl; }
-    private void beginBasicPokesEntry() {
+    private void rememberPokesLink(String link) {
+        if (BasicNavigation.pokesLink(link)) pokesLink = BasicNavigation.pokes(link, "", basicOrigin);
+    }
+    private void preparePokesEntry() {
         pendingPokesEntry = true; entryAwaiting = false; menuAttempted = false; entryBusy = false; entrySequence++;
+    }
+    private void beginBasicPokesEntry() {
+        preparePokesEntry();
         // Bootstrap the carrier's Home document before following Facebook's UI.
         // Do not turn a client-side navigation link into a fresh deep-link GET.
         loadBrowserTarget(BasicNavigation.home(currentBrowserUrl(), basicOrigin), true);
+    }
+    private void refreshPokes() {
+        if (!basicMode) { openPokes(); return; }
+        // Refresh the current/learned Pokes GET, never the Home bootstrap. Keep
+        // entry inspection active in case Facebook redirects back to its menu.
+        // The existing recovery path still handles a genuinely blank response.
+        preparePokesEntry();
+        loadBrowserTarget(pokesAddress(), true);
     }
     private void tryPokesEntry() {
         if (!pendingPokesEntry || !active || failed || recovering || web == null || !trusted(web.getUrl()) || entryBusy) return;
@@ -767,7 +786,9 @@ public final class MainActivity extends Activity {
                 JSONObject result = decoded instanceof String ? new JSONObject((String) decoded) : new JSONObject();
                 String kind = result.optString("kind");
                 updateBasicStatus(result.optString("state", "unknown"));
+                rememberPokesLink(result.optString("pokesLink", ""));
                 if ("existing".equals(kind)) {
+                    rememberPokesLink(currentBrowserUrl());
                     pendingPokesEntry = false; entryAwaiting = false; pokesExpected = true; basicSetupOpen = false;
                     loading = false; finishPageWait(); ensureVisualReady();
                     status.setText(running ? "Pokes opened through Facebook. Watching for Poke back…" : "Pokes is ready. Tap Start loop.");
@@ -797,7 +818,7 @@ public final class MainActivity extends Activity {
         String transport = network == null ? "none" : network.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "cellular"
             : network.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi" : "other/VPN";
         String category = authenticationUrl(currentBrowserUrl()) ? "sign-in" : pokesUrl(currentBrowserUrl()) ? "Pokes" : "Home/other Facebook view";
-        final String prefix = "AutoPoke 1.1.8 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
+        final String prefix = "AutoPoke 1.1.9 load report\nAndroid API: " + Build.VERSION.SDK_INT + "\nWebView: " + version
             + "\nNetwork: " + transport + "\nPage category: " + category + "\nBasic banner signal: " + lastBasicState
             + "\nLoop running: " + running + "\nUI entry pending: " + pendingPokesEntry + "\n" + loadDiagnostics.summary() + "\n";
         if (web == null) { putLoadReport(prefix + "DOM: browser unavailable"); return; }
@@ -833,8 +854,8 @@ public final class MainActivity extends Activity {
     }
     private void openPokes() {
         if (basicMode) {
-            pendingPokesEntry = true; entryAwaiting = false; menuAttempted = false;
-            if (web == null || failed || loading || !trusted(currentBrowserUrl()) || pokesUrl(currentBrowserUrl())) beginBasicPokesEntry();
+            preparePokesEntry();
+            if (web == null || failed || loading || !trusted(currentBrowserUrl())) beginBasicPokesEntry();
             else { tryPokesEntry(); scheduleCarrier(250); }
             return;
         }

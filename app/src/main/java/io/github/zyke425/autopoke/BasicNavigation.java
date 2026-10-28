@@ -33,15 +33,19 @@ final class BasicNavigation {
     }
     static String home(String current, String rememberedOrigin) { return chooseOrigin(current, rememberedOrigin) + "/"; }
     static String pokes(String current, String discoveredLink, String rememberedOrigin) {
-        if (pokesLink(discoveredLink)) {
-            URI u = URI.create(discoveredLink);
-            return origin(discoveredLink) + u.getRawPath() + (u.getRawQuery() == null ? "" : "?" + u.getRawQuery());
-        }
+        // A rendered Pokes route is the refresh target, including carrier/referral
+        // parameters. A Home/SPA URL must never replace a learned Pokes address.
+        if (pokesLink(current)) return withoutFragment(current);
+        if (pokesLink(discoveredLink)) return withoutFragment(discoveredLink);
         String path = "/pokes";
         try {
             if (!origin(current).isEmpty() && URI.create(current).getPath().matches("/pokes(?:\\.php)?/?")) path = URI.create(current).getRawPath();
         } catch (Exception ignored) { }
         return chooseOrigin(current, rememberedOrigin) + path;
+    }
+    private static String withoutFragment(String value) {
+        URI u = URI.create(value);
+        return origin(value) + u.getRawPath() + (u.getRawQuery() == null ? "" : "?" + u.getRawQuery());
     }
     private static String chooseOrigin(String current, String rememberedOrigin) {
         String actual = origin(current);

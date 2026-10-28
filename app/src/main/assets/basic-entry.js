@@ -31,7 +31,12 @@
         if (cfg.awaiting === true) return { kind: 'waiting' };
         const controls = Array.from(document.querySelectorAll('a,button,[role="link"],[role="button"]')).filter(usable);
         const poke = controls.find(el => label(el).some(value => /^pokes(?:\s*\(?[\d,]+\)?)?$/.test(value)) && safePokesHref(el));
-        if (poke) { poke.click(); return { kind: 'clicked' }; }
+        if (poke) {
+            // Keep the site's real navigation address even when its handler opens
+            // a Pokes view without updating the document's Home URL.
+            const pokesLink = poke.hasAttribute('href') ? new URL(poke.getAttribute('href'), location.href).href : '';
+            poke.click(); return { kind: 'clicked', pokesLink };
+        }
         if (cfg.allowMenu === true) {
             const menu = controls.find(el => label(el).includes('menu') && el.getBoundingClientRect().top < 240);
             if (menu) { menu.click(); return { kind: 'menu' }; }

@@ -1,13 +1,11 @@
-AutoPoke 1.1.8 — use Facebook's own client-side Pokes navigation and add load diagnostics.
+AutoPoke 1.1.9 — keep Basic-mode loop refreshes on Pokes.
 
-Install over the locally signed 1.1.1–1.1.7 APK. Confirm the title says AutoPoke 1.1.8.
+Install over the locally signed 1.1.1–1.1.8 APK. Confirm the title says AutoPoke 1.1.9.
 
-- Basic mode opens Home first, then clicks Facebook's visible Pokes link/control, preserving its client-side handler.
-- Use the same entry path after Basic-mode refresh, browser repair and activity recreation. Avoid reloading the same empty deep link.
-- Try the visible Menu once if necessary. If Pokes is not available, ask the user to navigate inside Facebook rather than guessing another endpoint.
-- Leave sign-in, Basic consent, Buy data and Poke back untouched during navigation. The existing poke loop starts only when enabled and the actual Pokes view is ready.
-- Add Settings → Copy load report: error codes, failed resource counts, software versions/network type and DOM counts only. Never include URLs, text, cookies, tokens or request/response bodies; no automatic upload.
+- Fix 1.1.8's normal refresh path, which deliberately reloaded Home and could reopen the carrier offer. Refresh the current/learned Pokes navigation address instead.
+- Preserve the mobile host and carrier/referral parameters. Learn the site's Pokes address even if its client-side view leaves the document URL at Home.
+- Keep inspecting the refreshed page until Pokes is actually ready, then resume scanning with saved attempts and duplicate guards. Follow Facebook's Pokes control again if the document redirects to its menu.
+- Keep initial Home bootstrap and bounded blank-page recovery. Open Pokes no longer reloads Home when Pokes is already visible; native reload also preserves the Pokes target.
+- Leave sign-in and carrier consent manual.
 
-103 offline browser tests include a reproduction where direct GET /pokes is blank but Facebook's client router works. 29 JVM tests plus Android build/lint and APK signature are checked.
-
-This does not establish live Smart Basic-mode support. If it is still blank, compare Pokes in Chrome on the same connection and paste the new load report. Facebook/carrier access cannot be granted by the APK.
+107 offline browser tests and 32 JVM tests passed; Android compilation, lint and the APK signature were checked locally. Repeated click/idle fixtures stay on Pokes without another Home load. Actual carrier behavior still needs validation on the reporting phone.
