@@ -2,11 +2,13 @@
 
 A standalone Android version of the supplied **Facebook Autopoke GUI 2.12** userscript. Opens Facebook in an in-app WebView and keeps the controls in Android's own UI, above the page.
 
-**[Download the newest APK from Releases](https://github.com/zyke425/autopokeapk/releases)** · **[Build status and APK artifacts](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
+**[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
+
+The checked-in APK was compiled and signature-verified locally. Android lint passed with no errors and the offline browser checks passed. GitHub Actions could not start its jobs because GitHub reported that the account is locked due to a billing issue. The APK above is available independently of Actions; automatic prereleases require a working runner.
 
 ## Install and use
 
-1. Open **Releases**, open the newest development build, and download **AutoPoke-debug.apk** under Assets. The first release appears after the build checks pass.
+1. Download **AutoPoke-debug.apk** using the link above. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
 2. Open the APK on your Android phone. Allow installation from the browser/file manager when Android asks. Requires **Android 8.0 or newer**.
 3. Open **AutoPoke** and sign in to your Facebook account on Facebook's page inside the app.
 4. Tap **Open Pokes**, then **Start loop**. Keep the app open.
@@ -20,7 +22,7 @@ No Tampermonkey or accessibility service is needed. This app uses its own sign-i
 | --- | --- |
 | Poke back | Clicks only rendered, enabled **Poke back** controls on a recognized Pokes view. Suggested **Poke** controls are ignored. English labels are currently required. |
 | Refresh | Default **1 second after the Pokes view is ready**, in addition to network/rendering time. Editable from 1 to 300 seconds. |
-| After a click | Waits at least the refresh delay and for the clicked row to change; gives an unchanged row up to 12 seconds before refreshing. |
+| After a click | Waits at least the refresh delay and for observed Facebook requests to finish. Gives an unchanged row 12 seconds before refreshing once requests settle. |
 | Click spacing | Default minimum **7 seconds**, editable from 5 to 300 seconds. No human-behavior disguise or rate-limit bypass. |
 | Duplicate guard | Same unchanged item waits 3 minutes before one retry; at most two attempts per unchanged signature. A new poke count is a new signature. Guards and attempts survive reloads and restarts. |
 | Restriction | A visible Facebook restriction, GraphQL rate-limit error, or HTTP 429 stops the loop. Check Facebook manually before using **Review pause**. |

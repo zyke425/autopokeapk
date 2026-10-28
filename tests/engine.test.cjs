@@ -65,6 +65,18 @@ test('an unchanged control gets time to finish before reload', async () => {
         assert.equal((await f.tick(start + 12000)).kind, 'refresh');
     } finally { await f.context.close(); }
 });
+test('refresh does not interrupt an in-flight poke request after an optimistic row update', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => window.fetch = () => new Promise(resolve => { window.finishRequest = resolve; }));
+        await f.page.evaluate(script);
+        await f.tick();
+        assert.equal((await f.tick(start + 15000)).kind, 'waiting');
+        await f.page.evaluate(async () => { finishRequest(new Response('{}')); await new Promise(r => setTimeout(r, 20)); });
+        assert.equal((await f.tick(start + 15500)).kind, 'refresh');
+    } finally { await f.context.close(); }
+});
 test('persistent duplicate guard survives a full reload', async () => {
     const f = await fixture(pageHtml(row()));
     try {

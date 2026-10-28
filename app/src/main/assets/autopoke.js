@@ -65,7 +65,7 @@
         return { button, identity: hash(identity), key: hash(identity + '|' + (counter ? counter[0] : text)) };
     }
     let state = null, pending = null, readySince = 0, recoveryUntil = 0;
-    let dirty = false, networkRestricted = false, networkError = false;
+    let dirty = false, networkRestricted = false, networkError = false, networkInFlight = 0;
     function readErrors(value) {
         if (!value || typeof value !== 'object') return;
         if (Array.isArray(value)) { value.forEach(readErrors); return; }
@@ -93,13 +93,20 @@
         const original = window.fetch;
         window.fetch = function (...args) {
             const track = graphql(args[0] && args[0].url || args[0]);
-            return original.apply(this, args).then(response => {
+            if (track) networkInFlight++;
+            let request;
+            try { request = original.apply(this, args); }
+            catch (error) { if (track) { networkInFlight--; networkError = true; } throw error; }
+            return request.then(response => {
                 if (track) {
                     if (!response.ok) { networkError = true; if (response.status === 429) networkRestricted = true; }
-                    response.clone().text().then(inspect, () => { networkError = true; });
+                    try {
+                        response.clone().text().then(inspect, () => { networkError = true; })
+                            .finally(() => { networkInFlight--; });
+                    } catch (_) { networkInFlight--; networkError = true; }
                 }
                 return response;
-            }, error => { if (track) networkError = true; throw error; });
+            }, error => { if (track) { networkInFlight--; networkError = true; } throw error; });
         };
     }
     if (window.XMLHttpRequest) {
@@ -107,15 +114,23 @@
         const urls = new WeakMap();
         proto.open = function (method, url, ...rest) { urls.set(this, url); return open.call(this, method, url, ...rest); };
         proto.send = function (...args) {
-            if (graphql(urls.get(this))) this.addEventListener('loadend', () => {
+            const track = graphql(urls.get(this));
+            let settled = false;
+            const finish = () => { if (track && !settled) { settled = true; networkInFlight--; } };
+            if (track) {
+                networkInFlight++;
+                this.addEventListener('loadend', () => {
                 if (this.status < 200 || this.status >= 300) networkError = true;
                 if (this.status === 429) networkRestricted = true;
                 try {
                     if (this.responseType === 'json') readErrors(this.response);
                     else if (!this.responseType || this.responseType === 'text') inspect(this.responseText);
                 } catch (_) { networkError = true; }
-            }, { once: true });
-            return send.apply(this, args);
+                finish();
+                }, { once: true });
+            }
+            try { return send.apply(this, args); }
+            catch (error) { if (track) networkError = true; finish(); throw error; }
         };
     }
     function tick(cfg) {
@@ -168,11 +183,11 @@
         if (pending) {
             const unchanged = items.some(item => item.key === pending.key && usable(item.button));
             const elapsed = now - pending.sentAt;
-            if (elapsed >= refreshMs && (!unchanged || elapsed >= 12000)) {
+            if (elapsed >= refreshMs && !networkInFlight && (!unchanged || elapsed >= 12000)) {
                 pending = null; readySince = 0;
                 return result('refresh', 'Refreshing Pokes after the click.', { detected: buttons.length });
             }
-            return result('waiting', 'Click attempted. Waiting for the row to update…', { detected: buttons.length });
+            return result('waiting', networkInFlight ? 'Click attempted. Waiting for Facebook’s request to finish…' : 'Click attempted. Waiting for the row to update…', { detected: buttons.length });
         }
         const item = items.find(item => {
             const record = state.records.find(r => r.key === item.key);
