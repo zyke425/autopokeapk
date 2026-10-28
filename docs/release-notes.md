@@ -1,24 +1,17 @@
-AutoPoke 1.1.2 — false-positive pause fix, Android 8.0 or newer.
+AutoPoke 1.1.4 — remove request-failed countdowns and improve mobile blank-screen recovery.
 
-Update directly from 1.1.1. Uninstall 1.0.0/1.1.0 before installing because the signing key changed in 1.1.1.
+Update directly from 1.1.1/1.1.2. Confirm the app title says AutoPoke 1.1.4. Uninstall 1.0.0/1.1.0 before installing because the signing key changed in 1.1.1.
 
-- Sign in to Facebook inside the app, tap **Open Pokes**, then **Start loop**.
-- Auto-clicks eligible **Poke back** controls and refreshes to find new ones.
-- Native controls stay above the page through reloads.
-- Change the refresh delay and minimum click interval in **Settings**.
-- **Stop loop** cancels future scans and automatic refreshes.
-- Idle refresh backoff, offline waiting, and bounded recovery for stalled Pokes loads.
-- Durable pre-click reservations reduce duplicate attempts after interruptions.
-- Full-page restriction detection and persistent temporary-error backoff.
-- Detect empty/invisible pages, reload, and replace the browser if needed.
-- Automatically recover a crashed or unresponsive renderer with a bounded retry budget.
-- Keep Facebook cookies during browser replacement, and reduce repeated injection/history growth during long sessions.
-- Generic retry messages and unrelated request errors no longer create permanent poke-restriction holds.
-- Real block notices and attributable poke rejections still pause with a recorded reason/source.
-- Repeated background errors cannot continually extend an active cooldown.
+- Remove the “A Facebook request failed. Retrying…” check and automatic restriction holds.
+- Clear old saved retry/hold fields while preserving attempts and duplicate guards.
+- Continue normal scanning/refreshing after failed responses. Unrelated background requests cannot stall the loop.
+- Wait only for the current poke's request completion; preserve guards when a hung request times out and refreshes.
+- Detect hidden mobile page content, stalled document loading, and redirected shells.
+- Check sustained white browser output using a temporary memory-only sample.
+- Retry using the main host with mobile layout, then recreate with software rendering if blank output recurs.
+- Preserve cookies during browser replacement. Recovery remains bounded if Facebook cannot be restored.
+- Include Data saver and optional carrier Free Facebook settings. Carrier access is unverified; the app cannot provide free data.
 
-Validated with 54 offline browser tests, 8 JVM recovery-policy tests, Android compilation/lint, and APK signature verification. The fix still needs confirmation on the reporting phone.
+64 offline browser tests and 14 JVM tests cover these behaviors. Android compilation, lint and APK signature are checked before publication. Physical-phone rendering and live Facebook behavior still need confirmation.
 
-This is a debug-signed development APK. The loop runs while the app is open and resumes when you return. Android can stop the app. Facebook may reject an automated click or disallow embedded sign-in; click counts are attempts, not server-confirmed pokes. If Facebook reports a restriction, the app stops until you check manually.
-
-APK builds from different machines may use different debug certificates. If Android reports an incompatible update, uninstall the old development build before installing this one; uninstalling clears its local sign-in and settings.
+The loop runs while the app is open. Click counts are attempts; Facebook decides whether to accept them. This build does not inspect request error responses or bypass Facebook limits. Sign-in/TLS errors and repeated failed browser repairs still require attention.

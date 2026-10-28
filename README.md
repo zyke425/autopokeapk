@@ -1,116 +1,85 @@
 # AutoPoke for Android
 
-Current downloadable APK: **1.1.2**. Source update: **1.1.3** (APK build pending).
+Current APK: **1.1.4** (version code 6), Android 8.0 or newer.
 
-A standalone Android version of the supplied **Facebook Autopoke GUI 2.12** userscript. Opens Facebook in an in-app WebView and keeps the controls in Android's own UI, above the page.
+A standalone Android app that opens Facebook in its own WebView, clicks rendered **Poke back** controls, and refreshes to find incoming pokes. Native Start/Stop and Settings controls stay above the page.
 
 **[Download AutoPoke-debug.apk](https://github.com/zyke425/autopokeapk/raw/refs/heads/main/downloads/AutoPoke-debug.apk)** · **[Build workflow](https://github.com/zyke425/autopokeapk/actions/workflows/android.yml)**
 
-The checked-in APK was compiled and signature-verified locally. Android lint passed with no errors and the offline browser checks passed. GitHub Actions could not start its jobs because GitHub reported that the account is locked due to a billing issue. The APK above is available independently of Actions; automatic prereleases require a working runner.
+## Changes in 1.1.4
 
-## Changes in 1.1.2
-
-- Narrow restriction detection: a generic **Try again later** message or a casual mention in a heading/dialog no longer permanently pauses poking.
-- Attribute observed request errors using the available friendly operation name, a poke-specific error path, or an unlabelled request synchronously emitted by the app's click. Unrelated and unattributed request errors use temporary backoff instead of claiming a confirmed poke restriction. No requests are constructed or replayed.
-- Record and display a pause reason/source. Genuine poke-request restrictions, explicit Facebook block notices, and main-page HTTP 429 responses remain held until manual review. Old pauses with no recorded cause stay labelled as an earlier pause; they are not silently cleared.
-- Keep one retry deadline during a cooldown so repeated background errors cannot extend it forever, and let an in-flight poke finish before processing unrelated failures.
-- Preserve a page-level restriction if an older asynchronous script result arrives after it.
-
-This APK uses the same signing certificate as 1.1.1 and can update it in place. The supplied screenshot shows the older **AutoPoke 1.1** header; installs from 1.0.0/1.1.0 still require uninstalling first because the signing key changed in 1.1.1.
-
-## Changes in 1.1.1
-
-- Detect a completed Pokes document that stays empty or invisible for 10 seconds, including an empty root URL reached while opening Pokes. Reload it once, then recreate the WebView if the problem repeats. Three failed repairs require a manual restart; a minute of healthy operation restores the repair budget.
-- Automatically replace a crashed renderer. On Android 10 and newer, also handle the renderer's unresponsive callback. A missing script callback or repeated empty results trigger browser recovery.
-- Preserve Facebook cookies and website storage during browser replacement, along with the native click-attempt total and duplicate-click reservations. Restrictions remain paused.
-- Display a recovery message over the browser area while it is blank. Keep loading checks active when page-finished callbacks are delayed, and request a redraw after resuming or first rendering Pokes.
-- Inject the engine once per document and avoid resending saved records on every poll. Trim oversized Pokes navigation history to reduce long-session work and retained history.
-
-**Installation change:** the temporary signing key used for 1.0.0/1.1.0 is no longer available. Version 1.1.1 uses a new signing key, so uninstall the older APK first and sign in again. The new private key has been backed up separately for future local updates. It is never committed to this repository.
-
-## Changes in 1.1.0
-
-- Save a duplicate-click reservation to disk **before** executing a poke. If navigation, Stop, or a restart interrupts preparation, the reserved row stays deferred instead of being clicked again immediately.
-- Increase idle refresh delays across reloads. New installs start at 5 seconds, then 10, 20, 40 and 60 seconds while no eligible poke appears. Finding an eligible poke resets the idle delay. Existing custom delays remain unchanged; adaptive mode can be disabled in Settings. This reduces idle reloads and may make detecting a new poke slower.
-- Recover from stalled Pokes loads and temporary page/server failures, with delays of 30, 60, 120, 240 and 300 seconds, then stop after the retry budget is exhausted. No reloads are attempted while no Internet-capable network is available. Login, TLS errors, and access-denied pages require manual attention.
-- Persist temporary GraphQL request backoff across reloads and increase it after repeated errors. Stop for manual review if an attempted poke still has an unknown result after 90 seconds.
-- Detect restriction headings even when Facebook replaces the Pokes view, and keep restriction state writes ordered with click reservations.
-- Preserve row identity when a relative timestamp changes in text-only layouts.
-
-Versions 1.0.0 and 1.1.0 shared a signing certificate. None of these releases prevent Facebook from rejecting actions or enforcing its limits.
+- Remove the **“A Facebook request failed. Retrying…”** check entirely. The engine no longer reads request responses, interprets GraphQL errors, or creates restriction holds. Failed chat/feed requests cannot delay the poke-back loop.
+- Discard saved retry deadlines and restriction flags from previous versions while preserving attempt totals and duplicate guards. An already stopped loop still needs **Start loop**.
+- Wait only for requests associated with the current poke attempt. A request that never settles eventually refreshes with its duplicate guard retained, instead of stopping the loop.
+- Recognize mobile pages whose hidden SPA content, redirected root route, or unfinished document previously concealed a blank/loading screen. Interactive pages can work without waiting for unrelated resources to finish loading.
+- Check persistent white output in mobile mode even when the DOM reports a ready page. The check samples a small browser-only image in memory; it is immediately discarded and never saved or transmitted.
+- Recover mobile pages first using the main Facebook host with the mobile user agent, then a replacement WebView with software rendering if blank output recurs. Desktop mode is not enabled by recovery. Cookie storage and click guards are preserved.
+- Include the data-saving settings previously added in source-only 1.1.3: block network images, use a minimum 15-second refresh in Data saver, and optionally try the carrier Free Facebook address. Free access is unverified and depends on your carrier; this app cannot provide free data. Automatic recovery never switches the carrier-free setting to a standard address.
 
 ## Install and use
 
-1. Download **AutoPoke-debug.apk** using the link above. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
-2. If using 1.0.0 or 1.1.0, uninstall it first; Android will clear its local sign-in and settings. Then open the new APK. Allow installation from the browser/file manager when Android asks. Requires **Android 8.0 or newer**.
-3. Open **AutoPoke** and sign in to your Facebook account on Facebook's page inside the app.
-4. Tap **Open Pokes**, then **Start loop**. Keep the app open.
-5. Tap **Stop loop** any time to stop scanning and automatic refreshes.
+1. Download the APK and open it on your Android phone. Its SHA-256 checksum is in `downloads/SHA256SUMS`.
+2. Update directly from **1.1.1 or 1.1.2**; these builds use the same saved development signing key. Builds **1.0.0/1.1.0** require uninstalling first because their signing key was lost before 1.1.1. Uninstalling removes local sign-in and settings.
+3. Open the app and confirm the title says **AutoPoke 1.1.4**.
+4. Sign in to Facebook inside the app, tap **Open Pokes**, and tap **Start loop**. Keep the app open.
+5. Tap **Stop loop** to stop scanning and automatic refreshes.
 
-No Tampermonkey or accessibility service is needed. This app uses its own sign-in session; it does not control the separate Facebook app or Chrome.
+No Tampermonkey or accessibility service is needed. This app uses its own Facebook session; it does not control the separate Facebook app or Chrome.
 
 ## Behavior and settings
 
-| Feature | Behavior |
+| Setting or behavior | Details |
 | --- | --- |
-| Poke back | Clicks only rendered, enabled **Poke back** controls on a recognized Pokes view. Suggested **Poke** controls are ignored. English labels are currently required. |
-| Refresh | New-install base delay **5 seconds after the Pokes view is ready**, plus network/rendering time. Editable from 1 to 300 seconds. Adaptive idle refresh is on by default and increases up to the larger of 60 seconds or your chosen base delay. |
-| After a click | Waits at least the refresh delay and for observed Facebook requests to finish. Gives an unchanged row 12 seconds before refreshing once requests settle. |
-| Click spacing | Default minimum **7 seconds**, editable from 5 to 300 seconds. No human-behavior disguise or rate-limit bypass. |
-| Duplicate guard | Android durably saves a reservation before clicking. Same unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. An interrupted reservation can defer a row even if its click was never sent. A new poke count is a new signature. Guards and attempts survive reloads and restarts. |
-| Restriction | An explicit Facebook block notice, an attributable poke-request restriction, or a main-page HTTP 429 holds the loop. The recorded reason appears on screen and in **Review pause**. Generic retry messages do not create a hold; unrelated/unattributed request errors use temporary backoff. |
-| Temporary failure | Observed request errors back off for 30 seconds, increasing to 5 minutes after repeated failures. Pokes-page load/server errors use bounded retries. A 45-second loading/rendering watchdog starts recovery; an unknown poke result after 90 seconds pauses for manual review. |
-| Blank / crashed browser | A completed empty or invisible document gets 10 seconds to render, followed by a 1-second reload delay. Repeated failures recreate the browser after 3 and 10 seconds. A crashed or unresponsive browser skips directly to replacement. Recovery keeps cookies, native state, and the ON setting; repeated failures eventually pause. |
-| Login / other routes | No automatic clicks or refreshes on login, checkpoint, email, password, or verification-code entry pages. An empty root redirect from an explicitly opened Pokes page can be repaired. Tap **Open Pokes** after finishing sign-in. |
-| Screen | Optional keep-awake setting while running; enabled by default. |
-| Layout | Mobile by default; **Desktop Facebook layout** is available in Settings. |
-| App hidden / closed | Native polling and WebView timers pause while hidden. Returns to the saved ON/OFF setting when reopened. No closed-app or screen-off execution is promised. |
+| Poke back | Only rendered, enabled English **Poke back** controls on a recognized Pokes view are eligible. Suggested **Poke** controls are ignored. |
+| Refresh | Base delay is 5 seconds on a new installation, editable from 1 to 300 seconds. Adaptive idle refresh increases up to the larger of 60 seconds or the base delay. Data saver imposes a 15-second minimum. Network/rendering time is additional. |
+| Click spacing | Default minimum 7 seconds, editable from 5 to 300 seconds. |
+| After a click | Wait for the current poke's observed request to settle and for the row to change. An unchanged row gets 12 seconds before refresh; an unresolved request gets at most 90 seconds. Neither response errors nor unrelated requests add a cooldown. |
+| Duplicate guard | Save a reservation before clicking. The unchanged item waits 3 minutes before one retry; at most two reservations per unchanged signature. A new poke count creates a new signature. Guards and attempts survive reloads/restarts. |
+| Request errors | No automatic restriction detection, response-body inspection, request-failed countdown, or **Review pause** hold. Facebook still decides whether to accept a poke. |
+| Browser/load recovery | Blank or stuck pages and dead renderers get bounded recovery. Failed main-document loads still need connection recovery; TLS/sign-in problems require attention. The app waits while no Internet-capable network is present. Repeated unsuccessful repairs eventually pause with a visible recovery message. |
+| Layout | Mobile by default; Desktop layout is available in Settings. Mobile recovery keeps the mobile user agent. |
+| Data saver | Blocks network images and reduces refresh frequency. It does not make access free, compress all traffic, or eliminate Facebook script downloads. Turn it off if sign-in requires images. |
+| Carrier Free Facebook | Tries `https://free.facebook.com/pokes`. Eligibility and Pokes availability depend on Facebook and your carrier. Redirects can still occur; the address bar explicitly says free access is unverified. |
+| App hidden / closed | Polling and WebView timers pause while hidden. The saved ON/OFF setting resumes when reopened. No closed-app or screen-off execution is promised. |
+| Screen | Optional keep-awake setting while running; on by default. |
 
-Click counts measure **attempts**, not Facebook-confirmed successful pokes. The app has not been tested against a signed-in Facebook account. Facebook can change its page, reject automated actions, or block sign-in from an embedded browser. If the login page says the browser is unsupported, this build cannot bypass that restriction.
+Click counts measure **attempts**, not Facebook-confirmed successful pokes. Facebook may change the page, reject clicks, or disallow embedded sign-in. The app does not bypass those restrictions.
 
 ## Privacy and permissions
 
-- Requests **Internet** and **network-state access** permissions. Network state is used to wait while offline. No accessibility access, overlays, notification access, contacts, or background service.
-- Facebook receives your sign-in through its HTTPS page. Cookies and website storage remain in the app's WebView sandbox. The app does not collect or log passwords, cookies, tokens, or page contents.
-- Local preferences hold settings, attempt totals, restriction status/reason/source, and hashed row signatures. Request scoping reads only the friendly operation-name field; raw request/response data and tokens are not stored. Android app backups are disabled.
-- No analytics or developer server. Only HTTPS Facebook pages can navigate inside the WebView. Other HTTPS links require a user gesture and a browser-opening confirmation. File/content access and mixed HTTP content are disabled; TLS certificate errors are cancelled.
-- There is no JavaScript-to-native interface. Native code polls a bounded JSON result from the top-level page.
-- Use **Settings → Sign out / clear Facebook data** to stop the loop and remove the app's Facebook data.
+- Internet and network-state access only. No accessibility access, overlays, contacts, notifications, or background service.
+- Facebook sign-in goes directly to its HTTPS page. Cookies and website storage stay in the app's WebView sandbox. Android backups are disabled.
+- Local preferences hold settings, attempt totals, and hashed row signatures. No analytics or developer server.
+- The request observer only tracks completion of the current poke's requests. It does not read response bodies, store credentials or tokens, or construct/replay Facebook API requests.
+- Mobile white-screen checking uses a temporary 64×64 memory sample of the browser area. No image is written to disk, uploaded, or logged.
+- HTTPS Facebook pages can navigate inside the WebView. External HTTPS links require a gesture and a browser-opening confirmation. File/content access and mixed HTTP content are disabled; TLS errors are cancelled.
+- No JavaScript-to-native interface is exposed. Native code polls a bounded JSON result from the top-level page.
+- **Settings → Sign out / clear Facebook data** stops the loop and clears Facebook cookies, cache, and website storage.
 
-## Build
+## Build and validation
 
-Requires JDK 17, Android SDK platform 35 and build tools 35.0.0. The Gradle wrapper pins Gradle 8.11.1; the Android Gradle plugin is pinned to 8.9.2.
-
-```sh
-./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
-```
-
-APK: `app/build/outputs/apk/debug/app-debug.apk`.
-
-For consistent local update signatures, restore the private signing backup to the ignored path `.local-signing/autopoke-debug.keystore` before building. The build uses this key when it exists. CI runners without the private key use their own development certificate.
+Requires JDK 17, Android SDK platform 35 and build tools 35.0.0. Gradle 8.11.1 and Android Gradle plugin 8.9.2 are pinned.
 
 ```sh
+./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 npm ci
 npx playwright install chromium
 npm test
 ```
 
-54 browser tests intercept every navigation with offline fixture HTML. They do not contact Facebook or send pokes. They cover mobile routes, reload persistence, duplicate guards, suggested-button exclusion, login and restriction pauses, timing, idle backoff, blank pages, false-positive notices, request attribution for fetch/XHR, pause reasons, repeated errors during cooldown, and concurrent poke/background requests. Eight JVM unit tests check page recovery, blank-browser escalation, stable recovery, and retry budgets. The Android fix has not been verified on the reporting phone or a live signed-in Facebook session.
+APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-GitHub Actions runs browser checks and Android compile/lint. A passing push to `main` publishes a debug-signed APK as a development prerelease, with an artifact copy kept for 30 days. Different machines/runners have different debug certificates: uninstall the previous development APK first if an update reports a signature conflict. Production signing and automatic app updates are not configured.
+The 64 browser tests use intercepted offline fixtures: no Facebook login or live pokes. They cover clicking/refreshing across repeated failed responses, old-state migration, unrelated/hung requests, duplicate guards, mobile loading and blank-page states, sign-in exclusions, and adaptive timing. Fourteen JVM tests cover recovery budgets, mobile fallback, and white-frame classification/deadlines. Device-specific rendering and a live signed-in Facebook session still need testing on the reporting phone.
+
+The checked-in APK is built and signature-verified locally. GitHub Actions previously could not start because GitHub reported an account billing lock; the checked-in download is available independently of Actions. CI runs browser tests, Android compilation, unit tests and lint when runners are available. A passing `main` build publishes a development APK prerelease.
+
+The private local signing backup is excluded from Git. CI uses its own debug key, so a CI-generated development APK may require uninstalling a locally signed build. Production signing and automatic updates are not configured.
 
 ## Source
 
-- `app/src/main/java/io/github/zyke425/autopoke/MainActivity.java`: native UI, WebView navigation, lifecycle, settings, and persistence.
+- `app/src/main/java/io/github/zyke425/autopoke/MainActivity.java`: native UI, WebView, lifecycle, settings, persistence and recovery integration.
 - `app/src/main/assets/autopoke.js`: visible-control detector and poke-back state machine.
-- `app/src/main/java/io/github/zyke425/autopoke/LoadRecovery.java`: bounded page-recovery delays.
-- `app/src/main/java/io/github/zyke425/autopoke/BrowserRecovery.java`: blank/crashed browser repair escalation and budget.
+- `LoadRecovery.java`, `BrowserRecovery.java`, `MobileRecovery.java`, `WhiteFrameWatchdog.java`: recovery policies and visual health checks.
 - `tests/engine.test.cjs`: offline browser regression tests.
 
-The interaction flow is adapted from the userscript supplied by the repository owner, which credited **augesrob (original); revised GUI and loop**. This project is unofficial and is not affiliated with Facebook or Meta.
-
-## Source changes in 1.1.3
-
-Settings now includes Data saver (blocks network images and uses a minimum 15-second refresh) and an optional carrier Free Facebook address. Mobile layout opens m.facebook.com. Free access is unverified and depends on carrier eligibility; this app cannot provide free data. Disable Data saver when login requires images.
-
-Automatic restriction holds have been removed. Existing saved restriction flags are cleared while duplicate guards remain. Poke request failures still receive temporary backoff, and failed page loads retain bounded recovery. Facebook can still reject requests.
+Adapted from the repository owner's **Facebook Autopoke GUI 2.12** userscript, which credited **augesrob (original); revised GUI and loop**. Unofficial; not affiliated with Facebook or Meta.

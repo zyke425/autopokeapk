@@ -14,8 +14,11 @@
         el.getAttribute('aria-label'), el.getAttribute('title')].some(isBackLabel);
     function visible(el) {
         if (!el || !el.isConnected || !el.getClientRects().length) return false;
-        const style = getComputedStyle(el);
-        return style.display !== 'none' && style.visibility === 'visible' && Number(style.opacity) !== 0;
+        for (let p = el; p; p = p.parentElement) {
+            const style = getComputedStyle(p);
+            if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+        }
+        return true;
     }
     function usable(el) {
         for (let p = el; p && p !== document.body; p = p.parentElement) {
@@ -66,8 +69,8 @@
         return { button, identity: hash(identity), key: hash(identity + '|' + (counter ? counter[0] : text)) };
     }
     let state = null, pending = null, prepared = null, authorizedToken = null;
-    let readySince = 0, stalledSince = 0, healthySince = 0, blankSince = 0;
-    let dirty = false, networkError = false, networkInFlight = 0, dispatchingPoke = false;
+    let readySince = 0, stalledSince = 0, blankSince = 0;
+    let dirty = false, dispatchingPoke = false;
     function requestScope(body) {
         // Inspect only the friendly operation name; never retain/replay the body.
         let name = '';
@@ -82,48 +85,29 @@
         // A request made synchronously by this exact button click is attributable.
         return dispatchingPoke ? 'poke' : 'unknown';
     }
-    function httpResult(status, scope) {
-        if (scope === 'poke' && (status < 200 || status >= 300)) networkError = true;
-    }
-    function readErrors(value, scope) {
-        if (!value || typeof value !== 'object') return;
-        if (Array.isArray(value)) { value.forEach(item => readErrors(item, scope)); return; }
-        if (scope === 'poke' && Array.isArray(value.errors) && value.errors.length) networkError = true;
-        if (value.payload) readErrors(value.payload, scope);
-    }
-    function inspect(text, scope) {
-        if (typeof text !== 'string' || text.length > 1000000) return;
-        text = text.replace(/^\s*for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
-        try { readErrors(JSON.parse(text), scope); } catch (_) {
-            for (const line of text.split('\n')) { try { readErrors(JSON.parse(line), scope); } catch (_) {} }
-        }
-    }
     function graphql(value) {
         try {
             const url = new URL(value, location.href);
             return /(^|\.)facebook\.com$/i.test(url.hostname) && /^\/(?:api\/)?graphql\/?$/.test(url.pathname);
         } catch (_) { return false; }
     }
-    // Observe errors from the page's own requests. Do not retain request/response data.
+    // Observe completion of this click's own requests only. Never read responses,
+    // inspect error codes, or let chat/feed requests stop the poke-back loop.
+    function requestAction(url, body) {
+        return pending && graphql(url) && requestScope(body) === 'poke' ? pending : null;
+    }
     if (typeof window.fetch === 'function') {
         const original = window.fetch;
         window.fetch = function (...args) {
-            const track = graphql(args[0] && args[0].url || args[0]);
-            const scope = track ? requestScope(args[1] && args[1].body) : 'other';
-            if (track) networkInFlight++;
+            const action = requestAction(args[0] && args[0].url || args[0], args[1] && args[1].body);
+            if (!action) return original.apply(this, args);
+            action.inFlight++;
             let request;
             try { request = original.apply(this, args); }
-            catch (error) { if (track) { networkInFlight--; if (scope === 'poke') networkError = true; } throw error; }
-            return request.then(response => {
-                if (track) {
-                    httpResult(response.status, scope);
-                    try {
-                        response.clone().text().then(text => inspect(text, scope), () => { if (scope === 'poke') networkError = true; })
-                            .finally(() => { networkInFlight--; });
-                    } catch (_) { networkInFlight--; networkError = true; }
-                }
-                return response;
-            }, error => { if (track) { networkInFlight--; if (scope === 'poke') networkError = true; } throw error; });
+            catch (error) { action.inFlight--; throw error; }
+            return request.then(response => { action.inFlight--; return response; }, error => {
+                action.inFlight--; throw error;
+            });
         };
     }
     if (window.XMLHttpRequest) {
@@ -131,41 +115,46 @@
         const urls = new WeakMap();
         proto.open = function (method, url, ...rest) { urls.set(this, url); return open.call(this, method, url, ...rest); };
         proto.send = function (...args) {
-            const track = graphql(urls.get(this));
-            const scope = track ? requestScope(args[0]) : 'other';
+            const action = requestAction(urls.get(this), args[0]);
+            if (!action) return send.apply(this, args);
+            action.inFlight++;
             let settled = false;
-            const finish = () => { if (track && !settled) { settled = true; networkInFlight--; } };
-            if (track) {
-                networkInFlight++;
-                this.addEventListener('loadend', () => {
-                httpResult(this.status, scope);
-                try {
-                    if (this.responseType === 'json') readErrors(this.response, scope);
-                    else if (!this.responseType || this.responseType === 'text') inspect(this.responseText, scope);
-                } catch (_) { networkError = true; }
-                finish();
-                }, { once: true });
-            }
+            const finish = () => { if (!settled) { settled = true; action.inFlight--; } };
+            this.addEventListener('loadend', finish, { once: true });
             try { return send.apply(this, args); }
-            catch (error) { if (track) networkError = true; finish(); throw error; }
+            catch (error) { this.removeEventListener('loadend', finish); finish(); throw error; }
         };
+    }
+    function renderedContent() {
+        if (!document.body || !visible(document.body)) return false;
+        // innerText includes opacity:0 descendants on some mobile pages. Check
+        // actual rendered text, so a hidden SPA tree cannot conceal a blank view.
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node, inspected = 0;
+        while ((node = walker.nextNode()) && inspected++ < 1500) {
+            if (!normalize(node.textContent) || !node.parentElement
+                || node.parentElement.closest('script,style,noscript,template') || !visible(node.parentElement)) continue;
+            const range = document.createRange(); range.selectNodeContents(node);
+            const shown = Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0
+                && rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight);
+            range.detach();
+            if (shown) return true;
+        }
+        return Array.from(document.querySelectorAll('input:not([type="hidden"]),textarea,select,iframe')).some(visible);
     }
     function tick(cfg) {
         const now = Number(cfg.now) || Date.now();
         if (!state) {
             const saved = cfg.state || {};
+            dirty = true; // Persist removal of retired restriction/retry fields, including old countdowns.
             state = { attempts: Math.max(0, Number(saved.attempts) || 0), nextAt: Number(saved.nextAt) || 0,
-                held: false,
-                holdReason: typeof saved.holdReason === 'string' ? saved.holdReason.slice(0, 180) : 'Earlier pause; the previous version did not record its cause.',
-                holdSource: ['poke-request', 'facebook-notice', 'page-response'].includes(saved.holdSource) ? saved.holdSource : 'legacy',
                 idleRounds: Math.max(0, Math.min(6, Number(saved.idleRounds) || 0)),
-                failures: Math.max(0, Math.min(5, Number(saved.failures) || 0)), retryAt: Number(saved.retryAt) || 0,
                 records: Array.isArray(saved.records) ? saved.records.filter(r => r && typeof r.key === 'string').slice(-300) : [] };
         }
         const refreshMs = Math.max(1000, Math.min(300000, Number(cfg.refreshMs) || 1000));
         const gapMs = Math.max(5000, Math.min(300000, Number(cfg.gapMs) || 7000));
         const result = (kind, message, extra = {}) => {
-            const value = { kind, message, attempts: state.attempts, detected: 0, ...extra };
+            const value = { kind, message, attempts: state.attempts, detected: 0, requestPending: !!(pending || prepared), ...extra };
             if (dirty) { value.state = JSON.parse(JSON.stringify(state)); dirty = false; }
             return value;
         };
@@ -177,36 +166,24 @@
             readySince = 0; return result('login', 'Sign in to Facebook, then tap Open Pokes.');
         }
         if (pending && now - pending.sentAt >= 90000) {
-            pending = null; prepared = null;
-            return result('error', 'The poke result is still unknown after 90s. Loop paused; check Facebook manually.');
+            pending = null; prepared = null; readySince = 0;
+            return result('refresh', 'Refreshing Pokes; the previous attempt remains duplicate-guarded.');
         }
-        if (networkError && pending && networkInFlight) return result('waiting', 'Waiting for the current poke request before retrying…');
-        if (networkError && !state.retryAt) {
-            pending = null; prepared = null; networkError = false; healthySince = 0;
-            state.failures = Math.min(5, state.failures + 1);
-            state.retryAt = now + Math.min(300000, 30000 * Math.pow(2, state.failures - 1));
-            readySince = 0; dirty = true;
-        }
-        // Repeated background failures must not push the same retry deadline forward forever.
-        networkError = false;
-        if (now < state.retryAt) return result('waiting', 'A Facebook request failed. Retrying in ' + Math.ceil((state.retryAt - now) / 1000) + 's.');
-        if (state.retryAt) { state.retryAt = 0; dirty = true; return result('refresh', 'Reloading after the temporary error.'); }
-        if (document.readyState !== 'complete' || !document.body) { readySince = 0; return result('loading', 'Waiting for Facebook to finish loading…'); }
         const exactRoute = /(?:^|\/)pokes(?:\.php)?\/?$/.test(location.pathname);
-        const bodyText = normalize(document.body.innerText);
-        const hiddenRoot = [document.documentElement, document.body].some(el => {
-            const style = getComputedStyle(el);
-            return style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0;
-        });
-        const empty = hiddenRoot || (!bodyText && !Array.from(document.querySelectorAll('input:not([type="hidden"]),textarea,select')).some(visible));
-        if (empty && (exactRoute || cfg.pokesExpected === true)) {
+        const expected = exactRoute || cfg.pokesExpected === true;
+        const bodyText = normalize(document.body && document.body.innerText);
+        if (expected && !renderedContent()) {
             readySince = 0;
-            // An optimistic UI update can temporarily remove the whole list.
-            // Keep the request and the durable guard intact until it finishes.
-            if (pending && networkInFlight) { blankSince = 0; return result('waiting', 'Waiting for Facebook’s request to finish…'); }
+            if (pending && pending.inFlight) { blankSince = 0; return result('waiting', 'Waiting for the poke request to finish…'); }
             if (!blankSince) blankSince = now;
-            if (now - blankSince >= 10000) return result('blank', 'Facebook returned a blank page. Recovering the browser…', { blank: true });
-            return result('rendering', 'Facebook is loading. Checking the blank page…', { blank: true });
+            const grace = document.readyState === 'loading' ? 30000 : 10000;
+            if (now - blankSince >= grace) return result('blank', 'The mobile page did not render. Recovering the browser…', { blank: true });
+            return result('rendering', 'Facebook is loading. Checking the page…', { blank: true });
+        }
+        if (!document.body || document.readyState === 'loading') {
+            if (!stalledSince) stalledSince = now;
+            if (expected && now - stalledSince >= 45000) return result('stalled', 'The Pokes page stayed in its loading state.');
+            return result('loading', 'Waiting for Facebook to finish loading…');
         }
         blankSince = 0;
         const buttons = backs(document).filter(visible);
@@ -218,16 +195,14 @@
         // Path alone is insufficient: don't reload an unrendered shell forever.
         if (!((exactRoute || (heading && evidence)) && (buttons.length || evidence))) {
             readySince = 0;
-            if (pending && networkInFlight) return result('waiting', 'Waiting for Facebook’s request to finish…');
-            if (exactRoute) {
+            if (pending && pending.inFlight) return result('waiting', 'Waiting for Facebook’s request to finish…');
+            if (expected) {
                 if (!stalledSince) stalledSince = now;
                 if (now - stalledSince >= 45000) return result('stalled', 'The Pokes view did not finish rendering.');
             } else stalledSince = 0;
-            return result('offpage', exactRoute ? 'Waiting for the Pokes view to render…' : 'Tap Open Pokes. The loop resumes on the Pokes page.');
+            return result('offpage', expected ? 'Waiting for the Pokes view to render…' : 'Tap Open Pokes. The loop resumes on the Pokes page.');
         }
         stalledSince = 0;
-        if (!healthySince) healthySince = now;
-        if (state.failures && !networkInFlight && now - healthySince >= 30000) { state.failures = 0; dirty = true; }
         const items = buttons.map(person).filter(Boolean);
         if (prepared) {
             if (now - prepared.at >= 15000) { prepared = null; return result('watching', 'The saved click expired. Watching for a new eligible poke.'); }
@@ -235,9 +210,9 @@
             const action = prepared; prepared = null;
             const current = person(action.button);
             if (!current || current.key !== action.key || !usable(action.button)) return result('watching', 'The row changed before the click. Scanning again.');
-            pending = { key: action.key, sentAt: now };
+            pending = { key: action.key, sentAt: now, inFlight: 0 };
             state.nextAt = Math.max(state.nextAt, now + gapMs);
-            state.attempts++; dirty = true; networkError = false;
+            state.attempts++; dirty = true;
             try { dispatchingPoke = true; action.button.click(); }
             catch (_) { pending = null; return result('error', 'The control could not be clicked. Stop and check Facebook.'); }
             finally { dispatchingPoke = false; }
@@ -246,11 +221,11 @@
         if (pending) {
             const unchanged = items.some(item => item.key === pending.key && usable(item.button));
             const elapsed = now - pending.sentAt;
-            if (elapsed >= refreshMs && !networkInFlight && (!unchanged || elapsed >= 12000)) {
+            if (elapsed >= refreshMs && !pending.inFlight && (!unchanged || elapsed >= 12000)) {
                 pending = null; readySince = 0;
                 return result('refresh', 'Refreshing Pokes after the click.', { detected: buttons.length });
             }
-            return result('waiting', networkInFlight ? 'Click attempted. Waiting for Facebook’s request to finish…' : 'Click attempted. Waiting for the row to update…', { detected: buttons.length });
+            return result('waiting', pending.inFlight ? 'Click attempted. Waiting for Facebook’s request to finish…' : 'Click attempted. Waiting for the row to update…', { detected: buttons.length });
         }
         const item = items.find(item => {
             const record = state.records.find(r => r.key === item.key);
@@ -265,7 +240,6 @@
             record.tries++; record.readyAt = now + 180000;
             state.records = state.records.slice(-300);
             state.nextAt = now + gapMs;
-            networkError = false;
             dirty = true;
             const token = hash(item.key + '|' + now + '|' + record.tries);
             prepared = { token, button: item.button, key: item.key, at: now };

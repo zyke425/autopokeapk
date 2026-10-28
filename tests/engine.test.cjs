@@ -114,46 +114,44 @@ test('two attempts are the limit for the same unchanged poke', async () => {
         assert.equal((await f.tick(start + 900000, { state: two.state })).kind, 'watching');
     } finally { await f.context.close(); }
 });
-test('a Facebook restriction pauses both clicks and reloads', async () => {
+test('notices cannot create an automatic restriction hold', async () => {
     const f = await fixture(pageHtml('<div role="alert">We limit how often you can do this. Try again later.</div>' + row()));
     try {
-        const r = await f.tick(); assert.equal(r.kind, 'restricted'); assert.equal(r.state.held, true);
-        assert.equal((await f.tick(start + 999999)).kind, 'restricted');
-        assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+        const r = await f.tick(); assert.equal(r.kind, 'clicked');
+        assert.equal(r.state.held, undefined);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+        assert.equal(await f.page.evaluate(() => clicks), 1);
     } finally { await f.context.close(); }
 });
-test('GraphQL rate-limit errors pause without replaying requests', async () => {
+
+test('GraphQL error responses do not stop a ready poke or replay requests', async () => {
     const f = await fixture(pageHtml(row()));
     try {
-        // Reset the document, put a fake existing fetch under the observer, then inject.
         await f.page.reload();
         await f.page.evaluate(() => {
             window.requests = 0;
-            window.fetch = async () => {
-                requests++;
-                return new Response(JSON.stringify({ errors: [{ code: 1675004, message: 'Rate limit exceeded' }] }));
-            };
+            window.fetch = async () => { requests++; return new Response(JSON.stringify({ errors: [{ code: 1675004, message: 'Rate limit exceeded' }] })); };
         });
         await f.page.evaluate(script);
-        await f.page.evaluate(async () => {
-            await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=PokeMutation' });
-            await new Promise(r => setTimeout(r, 10));
-        });
-        assert.equal((await f.tick()).kind, 'restricted');
+        await f.page.evaluate(async () => { await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=PokeMutation' }); });
+        assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
         assert.equal(await f.page.evaluate(() => requests), 1);
     } finally { await f.context.close(); }
 });
-test('temporary request errors wait before retrying', async () => {
+
+test('a rejected request uses normal row timing without a retry countdown', async () => {
     const f = await fixture(pageHtml(row().replace('this.disabled=true', "fetch('/api/graphql/').catch(()=>{})")));
     try {
         await f.page.reload(); await f.page.evaluate(() => window.fetch = () => Promise.reject(new Error('Offline')));
-        await f.page.evaluate(script); await f.tick();
-        await f.page.waitForTimeout(30);
-        assert.match((await f.tick(start + 500)).message, /request failed/);
-        assert.equal((await f.tick(start + 30000)).kind, 'waiting');
-        assert.equal((await f.tick(start + 30500)).kind, 'refresh');
+        await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
+        const waiting = await f.tick(start + 500);
+        assert.equal(waiting.kind, 'waiting'); assert.match(waiting.message, /row to update/);
+        assert.equal((await f.tick(start + 12000)).kind, 'refresh');
+        assert.equal(await f.page.evaluate(() => clicks), 1);
     } finally { await f.context.close(); }
 });
+
 test('login, checkpoint and unrelated pages never click or refresh', async () => {
     for (const [html, url, kind] of [
         [pageHtml('<input type="password">' + row()), 'https://www.facebook.com/pokes', 'login'],
@@ -245,20 +243,22 @@ test('Stop between preparation and execution prevents the click', async () => {
         assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
     } finally { await f.context.close(); }
 });
-test('a restriction replacing the entire page cancels a prepared click', async () => {
+test('removing the Pokes view before execution prevents a detached-button click', async () => {
     const f = await fixture(pageHtml(row()));
     try {
         const reserved = await f.rawTick();
         await f.page.evaluate(() => document.body.innerHTML = '<h1>You’re temporarily blocked</h1><p>Going too fast.</p>');
         const r = await f.execute(reserved.token);
-        assert.equal(r.kind, 'restricted'); assert.equal(r.state.held, true);
+        assert.equal(r.kind, 'offpage');
         assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
     } finally { await f.context.close(); }
 });
-test('restriction dialogs on a checkpoint page are recognized before login routing', async () => {
+
+test('checkpoint pages still require sign-in without inventing a restriction hold', async () => {
     const f = await fixture('<h1>Temporarily blocked</h1>', 'https://www.facebook.com/checkpoint/');
-    try { assert.equal((await f.tick()).kind, 'restricted'); } finally { await f.context.close(); }
+    try { assert.equal((await f.tick()).kind, 'login'); } finally { await f.context.close(); }
 });
+
 test('adaptive idle refresh backs off across reloads and caps at 60 seconds', async () => {
     const f = await fixture(pageHtml('<h2>Suggested</h2>'));
     try {
@@ -290,32 +290,28 @@ test('an eligible incoming poke resets the idle backoff', async () => {
         assert.equal(r.kind, 'clicked'); assert.equal(r.state.idleRounds, 0);
     } finally { await f.context.close(); }
 });
-test('temporary-error backoff survives a reload and escalates repeated failures', async () => {
-    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+test('old retry timers are discarded across reloads while duplicate guards survive', async () => {
+    const f = await fixture(pageHtml(row()));
     try {
-        async function failRequest() {
-            await f.page.reload();
-            await f.page.evaluate(() => window.fetch = () => Promise.reject(new Error('Offline')));
-            await f.page.evaluate(script);
-            await f.page.evaluate(async () => { try { await fetch('/api/graphql/'); } catch (_) {} });
-        }
-        await failRequest();
-        const first = await f.tick(); assert.equal(first.state.retryAt, start + 30000);
+        const first = await f.tick();
+        const old = { ...first.state, held: true, failures: 5, retryAt: start + 300000, holdReason: 'Old error' };
         await f.page.reload(); await f.page.evaluate(script);
-        assert.equal((await f.tick(start + 29999, { state: first.state })).kind, 'waiting');
-        const refresh = await f.tick(start + 30000, { state: first.state }); assert.equal(refresh.kind, 'refresh');
-        await failRequest();
-        const second = await f.tick(start + 31000, { state: refresh.state });
-        assert.equal(second.state.failures, 2); assert.equal(second.state.retryAt, start + 91000);
+        const r = await f.tick(start + 15000, { state: old });
+        assert.equal(r.kind, 'watching'); assert.equal(r.state.attempts, 1);
+        assert.deepEqual(r.state.records, first.state.records);
+        for (const key of ['held','failures','retryAt','holdReason','holdSource']) assert.equal(r.state[key], undefined);
+        await f.page.locator('article span').evaluate(el => el.textContent = '20 pokes · poked you now');
+        assert.equal((await f.tick(start + 16000)).kind, 'clicked');
     } finally { await f.context.close(); }
 });
-test('an unresolved poke request pauses for manual review instead of hanging forever', async () => {
+
+test('a never-settling poke request eventually refreshes with its guard intact', async () => {
     const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
     try {
         await f.page.reload(); await f.page.evaluate(() => window.fetch = () => new Promise(() => {}));
         await f.page.evaluate(script); await f.tick();
         assert.equal((await f.tick(start + 89999)).kind, 'waiting');
-        assert.equal((await f.tick(start + 90000)).kind, 'error');
+        assert.equal((await f.tick(start + 90000)).kind, 'refresh');
         assert.equal(await f.page.evaluate(() => clicks), 1);
     } finally { await f.context.close(); }
 });
@@ -437,48 +433,51 @@ test('casual mentions in headings and dialogs are not treated as block notices',
         try { assert.equal((await f.tick()).kind, 'watching'); } finally { await f.context.close(); }
     }
 });
-test('background chat rate errors cause temporary backoff instead of a held poke restriction', async () => {
+test('background chat errors never add a request-failed countdown', async () => {
     const f = await observedError('ChatSidebarQuery');
     try {
-        const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false);
-        assert.equal((await f.tick(start + 30000)).kind, 'refresh');
+        const r = await f.tick(); assert.equal(r.kind, 'watching'); assert.equal(r.state.retryAt, undefined);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
     } finally { await f.context.close(); }
 });
+
 test('unattributed GraphQL rate errors do not claim a confirmed poke rejection', async () => {
     const f = await observedError(null);
-    try { const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); }
+    try { const r = await f.tick(); assert.equal(r.kind, 'watching'); assert.equal(r.state.held, undefined); }
     finally { await f.context.close(); }
 });
 test('read-only Pokes queries are distinguished from poke mutations', async () => {
     const f = await observedError('PokesBackButtonStateQuery', 200, { code: 1675004, message: 'Rate limit exceeded', path: ['poke'] });
-    try { const r = await f.tick(); assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); }
+    try { const r = await f.tick(); assert.equal(r.kind, 'watching'); assert.equal(r.state.held, undefined); }
     finally { await f.context.close(); }
 });
-test('a known poke mutation error records a persistent, specific pause reason', async () => {
+test('a known poke mutation error cannot stop the next eligible row', async () => {
     const f = await observedError('PokeMutation');
     try {
-        const r = await f.tick(); assert.equal(r.kind, 'restricted'); assert.equal(r.state.held, true);
-        assert.equal(r.restrictionSource, 'poke-request'); assert.match(r.restrictionReason, /1675004/);
-        await f.page.reload(); await f.page.evaluate(script);
-        const restored = await f.tick(start + 60000, { state: r.state });
-        assert.equal(restored.kind, 'restricted'); assert.equal(restored.restrictionReason, r.restrictionReason);
+        const r = await f.tick(); assert.equal(r.kind, 'watching'); assert.equal(r.state.held, undefined);
+        await f.page.locator('body').evaluate((el, html) => el.insertAdjacentHTML('beforeend', html), row());
+        assert.equal((await f.tick(start + 500)).kind, 'clicked');
     } finally { await f.context.close(); }
 });
-test('a poke-specific error path attributes an otherwise unknown request', async () => {
+
+test('poke-looking error paths are ignored without response inspection', async () => {
     const f = await observedError(null, 200, { code: 1675004, message: 'Rate limit exceeded', path: ['poke'] });
-    try { assert.equal((await f.tick()).kind, 'restricted'); } finally { await f.context.close(); }
+    try { assert.equal((await f.tick()).kind, 'watching'); } finally { await f.context.close(); }
 });
-test('HTTP 429 on unrelated traffic is temporary, while a poke HTTP 429 is explicit', async () => {
+
+test('HTTP errors on page requests do not create engine retry timers', async () => {
     for (const operation of [null, 'ChatSidebarQuery', 'PokeMutation']) {
-        const f = await observedError(operation, 429, null);
-        try {
-            const r = await f.tick();
-            assert.equal(r.kind, operation === 'PokeMutation' ? 'restricted' : 'waiting');
-            if (operation === 'PokeMutation') assert.match(r.restrictionReason, /HTTP 429/);
-            else assert.equal(r.state.held, false);
-        } finally { await f.context.close(); }
+        for (const status of [429, 500]) {
+            const f = await observedError(operation, status, null);
+            try {
+                const r = await f.tick(); assert.equal(r.kind, 'watching');
+                assert.equal(r.state.retryAt, undefined); assert.equal(r.state.held, undefined);
+                assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+            } finally { await f.context.close(); }
+        }
     }
 });
+
 test('an unlabelled request synchronously emitted by the poke click is attributable', async () => {
     const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/')")));
     try {
@@ -486,7 +485,8 @@ test('an unlabelled request synchronously emitted by the poke click is attributa
         await f.page.evaluate(() => window.fetch = async () => new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
         await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
         const r = await f.tick(start + 500);
-        assert.equal(r.kind, 'restricted'); assert.equal(r.attempts, 1);
+        assert.equal(r.kind, 'waiting'); assert.equal(r.attempts, 1);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
     } finally { await f.context.close(); }
 });
 test('an explicitly unrelated operation emitted during a click is not misattributed', async () => {
@@ -496,7 +496,8 @@ test('an explicitly unrelated operation emitted during a click is not misattribu
         await f.page.evaluate(() => window.fetch = async () => new Response(JSON.stringify({ errors: [{ code: 1675004 }] })));
         await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(20);
         const r = await f.tick(start + 500);
-        assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false);
+        assert.equal(r.kind, 'waiting'); assert.equal(r.attempts, 1);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
     } finally { await f.context.close(); }
 });
 test('XHR errors use the same action scoping as fetch errors', async () => {
@@ -509,7 +510,7 @@ test('XHR errors use the same action scoping as fetch errors', async () => {
                 xhr.addEventListener('loadend', resolve, { once: true });
                 xhr.send('fb_api_req_friendly_name=' + operation);
             }), operation);
-            assert.equal((await f.tick()).kind, operation === 'PokeMutation' ? 'restricted' : 'waiting');
+            assert.equal((await f.tick()).kind, 'watching');
         } finally { await f.context.close(); }
     }
 });
@@ -529,41 +530,42 @@ test('URL-encoded, JSON, URLSearchParams, and FormData names are scoped without 
                 if (format === 'form') { body = new FormData(); for (const [k,v] of Object.entries(fields)) body.set(k,v); }
                 await fetch('/api/graphql/', { method: 'POST', body }); await new Promise(r => setTimeout(r, 15));
             }, format);
-            const r = await f.tick(); assert.equal(r.kind, 'restricted');
+            const r = await f.tick(); assert.equal(r.kind, 'watching');
             assert.equal(JSON.stringify(r).includes('FAKE_SECRET_NOT_TO_SAVE'), false);
             assert.equal(JSON.stringify(r).includes('fb_dtsg'), false);
         } finally { await f.context.close(); }
     }
 });
-test('explicit block notices retain protection and report their source', async () => {
+test('visible notices do not turn off a healthy Pokes loop', async () => {
     for (const notice of ['<h1>You are temporarily blocked</h1>', '<h1>Rate limit exceeded</h1>', '<div role="alert">It looks like you were misusing this feature by going too fast.</div>']) {
         const f = await fixture(pageHtml('<h2>Suggested</h2>' + notice));
-        try { const r = await f.tick(); assert.equal(r.kind, 'restricted'); assert.equal(r.restrictionSource, 'facebook-notice'); }
+        try { const r = await f.tick(); assert.equal(r.kind, 'watching'); assert.equal((await f.tick(start + 1000)).kind, 'refresh'); }
         finally { await f.context.close(); }
     }
 });
-test('an older saved pause is labelled as unknown and is not silently cleared', async () => {
-    const f = await fixture(pageHtml('<h2>Suggested</h2>'));
+
+test('old saved holds and countdowns cannot block an eligible poke', async () => {
+    const f = await fixture(pageHtml(row()));
     try {
-        const r = await f.tick(start, { state: { held: true } });
-        assert.equal(r.kind, 'restricted'); assert.equal(r.restrictionSource, 'legacy'); assert.match(r.restrictionReason, /previous version/);
+        const r = await f.tick(start, { state: { attempts: 131, held: true, holdReason: 'Old pause', retryAt: start + 300000, failures: 5 } });
+        assert.equal(r.kind, 'clicked'); assert.equal(r.attempts, 132);
+        assert.equal(r.state.held, undefined); assert.equal(r.state.retryAt, undefined);
     } finally { await f.context.close(); }
 });
-test('repeated errors during a cooldown do not extend its retry deadline forever', async () => {
+
+test('repeated background errors leave normal refresh timing intact', async () => {
     const f = await observedError('ChatSidebarQuery');
     try {
-        await f.tick();
+        await f.tick(start, { refreshMs: 30000, adaptive: false });
         for (const elapsed of [10000, 20000, 29999, 30000]) {
-            await f.page.evaluate(async () => {
-                await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=ChatSidebarQuery' });
-                await new Promise(r => setTimeout(r, 15));
-            });
-            const r = await f.tick(start + elapsed);
-            assert.equal(r.kind, elapsed < 30000 ? 'waiting' : 'refresh');
-            if (r.state && elapsed < 30000) assert.equal(r.state.retryAt, start + 30000);
+            await f.page.evaluate(async () => { await fetch('/api/graphql/', { method: 'POST', body: 'fb_api_req_friendly_name=ChatSidebarQuery' }); });
+            const r = await f.tick(start + elapsed, { refreshMs: 30000, adaptive: false });
+            assert.equal(r.kind, elapsed < 30000 ? 'watching' : 'refresh');
+            assert.equal(r.state?.retryAt, undefined);
         }
     } finally { await f.context.close(); }
 });
+
 test('an unrelated error does not discard or interrupt an in-flight poke', async () => {
     const handler = "this.disabled=true;fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=PokeMutation'});fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=ChatSidebarQuery'})";
     const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
@@ -578,7 +580,122 @@ test('an unrelated error does not discard or interrupt an in-flight poke', async
         assert.equal((await f.tick(start + 30000)).kind, 'waiting');
         await f.page.evaluate(async () => { finishPoke(new Response('{}')); await new Promise(r => setTimeout(r, 20)); });
         const r = await f.tick(start + 31000);
-        assert.equal(r.kind, 'waiting'); assert.equal(r.state.held, false); assert.equal(r.state.attempts, 1);
-        assert.equal((await f.tick(start + 61000)).kind, 'refresh');
+        assert.equal(r.kind, 'refresh'); assert.equal(r.attempts, 1);
+    } finally { await f.context.close(); }
+});
+
+test('mobile hidden SPA descendants trigger recovery even with stale Pokes text', async () => {
+    for (const style of ['opacity:0', 'visibility:hidden', 'display:none']) {
+        const f = await fixture('<html><body><main style="' + style + '">' + pageHtml(row()) + '</main></body></html>', 'https://m.facebook.com/pokes');
+        try {
+            assert.equal((await f.tick()).kind, 'rendering');
+            assert.equal((await f.tick(start + 10000)).kind, 'blank');
+            assert.equal(await f.page.evaluate(() => window.clicks || 0), 0);
+        } finally { await f.context.close(); }
+    }
+});
+test('mobile redirected shells get a recovery deadline without an exact Pokes path', async () => {
+    const f = await fixture('<html><body>Loading…</body></html>', 'https://m.facebook.com/');
+    try {
+        assert.equal((await f.tick(start, { pokesExpected: true })).kind, 'offpage');
+        assert.equal((await f.tick(start + 45000, { pokesExpected: true })).kind, 'stalled');
+    } finally { await f.context.close(); }
+});
+test('an interactive mobile document can poke without waiting for unrelated resources', async () => {
+    const f = await fixture(pageHtml(row()), 'https://m.facebook.com/pokes');
+    try {
+        await f.page.evaluate(() => Object.defineProperty(document, 'readyState', { get: () => 'interactive' }));
+        assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+    } finally { await f.context.close(); }
+});
+test('a permanently loading blank mobile document is recovered after its longer grace', async () => {
+    const f = await fixture('<html><body></body></html>', 'https://m.facebook.com/pokes');
+    try {
+        await f.page.evaluate(() => Object.defineProperty(document, 'readyState', { get: () => 'loading' }));
+        assert.equal((await f.tick()).kind, 'rendering');
+        assert.equal((await f.tick(start + 29999)).kind, 'rendering');
+        assert.equal((await f.tick(start + 30000)).kind, 'blank');
+    } finally { await f.context.close(); }
+});
+test('a never-loading mobile shell cannot hold the engine forever', async () => {
+    const f = await fixture('<html><body>Loading…</body></html>', 'https://m.facebook.com/pokes');
+    try {
+        await f.page.evaluate(() => Object.defineProperty(document, 'readyState', { get: () => 'loading' }));
+        assert.equal((await f.tick()).kind, 'loading');
+        assert.equal((await f.tick(start + 45000)).kind, 'stalled');
+    } finally { await f.context.close(); }
+});
+test('background requests that never settle cannot interrupt normal refresh', async () => {
+    const handler = "this.disabled=true;fetch('/api/graphql/',{method:'POST',body:'fb_api_req_friendly_name=ChatSidebarQuery'})";
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
+    try {
+        await f.page.reload(); await f.page.evaluate(() => window.fetch = () => new Promise(() => {}));
+        await f.page.evaluate(script); assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+    } finally { await f.context.close(); }
+});
+test('poke response bodies are never read to make automation decisions', async () => {
+    const handler = "this.disabled=true;fetch('/api/graphql/')";
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
+    try {
+        await f.page.reload();
+        await f.page.evaluate(() => {
+            window.bodyReads = 0;
+            window.fetch = async () => ({ status: 429, clone() { bodyReads++; throw new Error('Do not inspect'); }, text() { bodyReads++; throw new Error('Do not inspect'); } });
+        });
+        await f.page.evaluate(script); await f.tick(); await f.page.waitForTimeout(10);
+        assert.equal((await f.tick(start + 1000)).kind, 'refresh');
+        assert.equal(await f.page.evaluate(() => bodyReads), 0);
+    } finally { await f.context.close(); }
+});
+test('an actual XHR poke waits for completion and ignores its error response', async () => {
+    const handler = "this.disabled=true;const x=new XMLHttpRequest();x.open('POST','/api/graphql/');x.send('fb_api_req_friendly_name=PokeMutation')";
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
+    try {
+        let release;
+        const responseGate = new Promise(resolve => { release = resolve; });
+        await f.context.route('**/api/graphql/', async route => { await responseGate; await route.fulfill({ status: 429, contentType: 'application/json', body: '{"errors":[{"code":1675004}]}' }); });
+        assert.equal((await f.tick()).kind, 'clicked');
+        assert.equal((await f.tick(start + 15000)).kind, 'waiting');
+        release(); await f.page.waitForTimeout(100);
+        assert.equal((await f.tick(start + 16000)).kind, 'refresh');
+    } finally { await f.context.close(); }
+});
+test('late completion of an expired request cannot poison the next poke', async () => {
+    const handler = "this.disabled=true;fetch('/api/graphql/')";
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', handler)));
+    try {
+        await f.page.reload(); await f.page.evaluate(() => window.fetch = () => new Promise(resolve => { window.finishOld = resolve; }));
+        await f.page.evaluate(script); const first = await f.tick();
+        assert.equal((await f.tick(start + 90000)).kind, 'refresh');
+        await f.page.locator('article').evaluate(el => { el.querySelector('span').textContent = '20 pokes · poked you now'; el.querySelector('button').disabled = false; el.querySelector('button').onclick = () => { clicks++; el.querySelector('button').disabled = true; }; });
+        assert.equal((await f.tick(start + 91000)).kind, 'clicked');
+        await f.page.evaluate(() => finishOld(new Response('{}')));
+        assert.equal((await f.tick(start + 92000)).kind, 'refresh');
+        assert.equal(first.state.records[0].tries, 1);
+        assert.equal(await f.page.evaluate(() => clicks), 2);
+    } finally { await f.context.close(); }
+});
+
+test('successive incoming pokes keep looping across reloads and failed requests', async () => {
+    const f = await fixture(pageHtml(row().replace('this.disabled=true', "this.disabled=true;fetch('/api/graphql/').catch(()=>{})")));
+    try {
+        let state = { held: true, failures: 5, retryAt: start + 300000 };
+        for (let round = 0; round < 24; round++) {
+            if (round) await f.page.reload();
+            await f.page.locator('article span').evaluate((el, count) => el.textContent = count + ' pokes · poked you now', 19 + round);
+            await f.page.evaluate(round => {
+                window.fetch = round % 3 === 0 ? () => Promise.reject(new Error('Request failed'))
+                    : async () => new Response('{"errors":[{"code":1675004}]}', { status: round % 3 === 1 ? 429 : 200 });
+            }, round);
+            await f.page.evaluate(script);
+            const now = start + round * 8000;
+            const clicked = await f.tick(now, { state });
+            assert.equal(clicked.kind, 'clicked'); assert.equal(clicked.attempts, round + 1); state = clicked.state;
+            const result = await f.tick(now + 1000);
+            assert.equal(result.kind, 'refresh'); assert.doesNotMatch(result.message, /request failed|retrying/i);
+        }
+        assert.equal(state.attempts, 24); assert.equal(state.records.length, 24);
     } finally { await f.context.close(); }
 });

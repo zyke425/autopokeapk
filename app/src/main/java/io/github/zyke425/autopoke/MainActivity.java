@@ -7,6 +7,8 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -20,6 +22,7 @@ import android.os.SystemClock;
 import android.os.Build;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.PixelCopy;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -55,7 +58,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
-    private static final String POKES = "https://www.facebook.com/pokes?ref=search";
     private static final int BG = Color.rgb(16, 26, 40);
     private static final int MUTED = Color.rgb(169, 185, 205);
     private static final int MINT = Color.rgb(142, 232, 203);
@@ -63,6 +65,8 @@ public final class MainActivity extends Activity {
     private final ExecutorService stateWriter = Executors.newSingleThreadExecutor();
     private final LoadRecovery recovery = new LoadRecovery();
     private final BrowserRecovery browserRecovery = new BrowserRecovery();
+    private final MobileRecovery mobileRecovery = new MobileRecovery();
+    private final WhiteFrameWatchdog whiteFrames = new WhiteFrameWatchdog();
     private WebView web;
     private FrameLayout browserHost;
     private TextView browserNotice;
@@ -77,6 +81,8 @@ public final class MainActivity extends Activity {
     private boolean repairingBrowser, engineReady, pokesExpected = true;
     private boolean dataSaver;
     private boolean freeMode;
+    private boolean frameProbePending, clickPending, frameReady;
+    private long lastFrameProbe;
     private int historyChecked = -1;
     private int emptyScriptResults;
     private int refreshSeconds, gapSeconds, navigation, loopEpoch, evaluationSequence;
@@ -98,7 +104,10 @@ public final class MainActivity extends Activity {
         gapSeconds = clamp(prefs.getInt("gap", 7), 5, 300);
         try { loopState = new JSONObject(prefs.getString("state", "{}")); }
         catch (Exception ignored) { loopState = new JSONObject(); }
-        loopState.remove("held"); loopState.remove("holdReason"); loopState.remove("holdSource");
+        // Retire every old request-error countdown/hold while keeping attempts and
+        // duplicate reservations. A stopped loop still requires the Start button.
+        for (String key : new String[]{"held", "holdReason", "holdSource", "failures", "retryAt"}) loopState.remove(key);
+        prefs.edit().putString("state", loopState.toString()).apply();
         try (InputStream in = getAssets().open("autopoke.js")) {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             byte[] buffer = new byte[8192]; int length;
@@ -144,7 +153,7 @@ public final class MainActivity extends Activity {
         setContentView(root);
         LinearLayout panel = column(); panel.setPadding(dp(16), dp(10), dp(16), dp(12)); root.addView(panel);
         LinearLayout heading = new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("AutoPoke 1.1.3", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
+        TextView title = text("AutoPoke 1.1.4", 25, Color.WHITE); title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button settings = button("Settings", Color.rgb(35, 50, 69), Color.WHITE);
         settings.setContentDescription("Open AutoPoke settings"); settings.setOnClickListener(v -> showSettings());
@@ -239,8 +248,10 @@ public final class MainActivity extends Activity {
                 if (view != web) return;
                 navigation++; evaluationSequence++; evaluating = false; savingGuard = false; loading = true; failed = false; recovering = false;
                 engineReady = false; emptyScriptResults = 0; repairingBrowser = false; browserNotice.setVisibility(View.GONE);
+                frameReady = false; clickPending = false;
+                if (!pokesExpected && !pokesUrl(url)) whiteFrames.reset();
                 handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelEvaluationTimeout(); armLoadTimeout();
-                address.setText(trusted(url) ? Uri.parse(url).getHost() + " · secure connection" : "Page blocked");
+                address.setText(trusted(url) ? Uri.parse(url).getHost() + (freeMode ? " · free access unverified" : " · secure connection") : "Page blocked");
                 status.setText("Loading Facebook…");
                 if (!trusted(url)) { view.stopLoading(); pageError("Only secure Facebook pages can open inside this app."); }
                 else schedule(500);
@@ -255,7 +266,7 @@ public final class MainActivity extends Activity {
             @Override public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError error) {
                 if (view != web || !req.isForMainFrame() || failed) return;
                 int code = error.getErrorCode();
-                if (pokesUrl(req.getUrl().toString()) && code != ERROR_FAILED_SSL_HANDSHAKE
+                if ((pokesUrl(req.getUrl().toString()) || pokesExpected) && code != ERROR_FAILED_SSL_HANDSHAKE
                     && code != ERROR_UNSUPPORTED_SCHEME && code != ERROR_AUTHENTICATION && code != ERROR_BAD_URL) {
                     queueRecovery("Could not load Facebook.");
                 } else pageError("Could not load Facebook. Check the page, then tap ↻.");
@@ -265,7 +276,7 @@ public final class MainActivity extends Activity {
                 if (response.getStatusCode() == 429) {
                     queueRecovery("Facebook could not load the page (HTTP 429).");
                 }
-                else if (response.getStatusCode() >= 500 && pokesUrl(req.getUrl().toString())) queueRecovery("Facebook returned a temporary server error.");
+                else if (response.getStatusCode() >= 500 && (pokesUrl(req.getUrl().toString()) || pokesExpected)) queueRecovery("Facebook returned a temporary server error.");
                 else pageError("Facebook returned an error. Check the page, then tap ↻.");
             }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler ssl, SslError error) {
@@ -286,7 +297,7 @@ public final class MainActivity extends Activity {
     private void configureRendererRecovery() {
         web.setWebViewRenderProcessClient(new WebViewRenderProcessClient() {
             @Override public void onRenderProcessUnresponsive(WebView view, WebViewRenderProcess renderer) {
-                if (view != web || !active || !running || recovering || loopState.optBoolean("held")) return;
+                if (view != web || !active || !running || recovering) return;
                 queueBrowserRecovery("The Facebook browser stopped responding.", true);
                 if (renderer != null) renderer.terminate();
             }
@@ -312,7 +323,7 @@ public final class MainActivity extends Activity {
         cancelLoadTimeout();
         final int generation = navigation;
         loadTimeout = () -> {
-            if (generation == navigation && active && running && loading && web != null && pokesUrl(web.getUrl())) queueRecovery("The Facebook page took too long to load.");
+            if (generation == navigation && active && running && loading && web != null && (pokesUrl(web.getUrl()) || pokesExpected)) queueRecovery("The Facebook page took too long to load.");
         };
         if (active) handler.postDelayed(loadTimeout, 45000);
     }
@@ -329,7 +340,7 @@ public final class MainActivity extends Activity {
     }
     private void queueRecovery(String message) {
         if (recovering || web == null) return;
-        if (!running || loopState.optBoolean("held")) { pageError(message + " Tap ↻ to retry."); return; }
+        if (!running) { pageError(message + " Tap ↻ to retry."); return; }
         loading = false; failed = true; evaluating = false; savingGuard = false; recovering = true;
         navigation++; evaluationSequence++; handler.removeCallbacks(poll); cancelLoadTimeout(); cancelEvaluationTimeout();
         web.stopLoading();
@@ -343,7 +354,7 @@ public final class MainActivity extends Activity {
         navigation++; evaluationSequence++; evaluating = false; savingGuard = false; engineReady = false;
         handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
         loading = false; failed = true;
-        if (!running || loopState.optBoolean("held")) {
+        if (!running) {
             recovering = false; repairingBrowser = false;
             showBrowserNotice(message + "\nTap Open Pokes to reopen it."); return;
         }
@@ -358,7 +369,7 @@ public final class MainActivity extends Activity {
     }
     private void updateRecovery() {
         handler.removeCallbacks(retryLoad);
-        if (!active || !running || !recovering || loopState.optBoolean("held")) return;
+        if (!active || !running || !recovering) return;
         long remaining = repairingBrowser ? browserRecovery.remaining(SystemClock.elapsedRealtime()) : recovery.remaining(SystemClock.elapsedRealtime());
         if (!hasNetwork()) status.setText("Connection unavailable. Waiting for Internet access…");
         else if (remaining > 0) status.setText(recoveryMessage + " Retrying in " + ((remaining + 999) / 1000) + "s.");
@@ -426,16 +437,11 @@ public final class MainActivity extends Activity {
                 emptyScriptResults = 0;
                 JSONObject result = new JSONObject((String) decoded);
                 String kind = result.optString("kind");
+                clickPending = result.optBoolean("requestPending");
                 if ("reinject".equals(kind)) { engineReady = false; schedule(250); return; }
                 engineReady = true;
                 if (result.has("state")) {
-                    JSONObject incoming = result.getJSONObject("state");
-                    // A late script callback must not clear a page-level HTTP 429 pause.
-                    if (loopState.optBoolean("held") && !incoming.optBoolean("held")) {
-                        incoming.put("held", true); incoming.put("holdReason", restrictionReason());
-                        incoming.put("holdSource", loopState.optString("holdSource", "legacy"));
-                    }
-                    loopState = incoming;
+                    loopState = result.getJSONObject("state");
                     if (!"prepared".equals(kind)) persistState();
                 }
                 if ("prepared".equals(kind)) {
@@ -461,13 +467,9 @@ public final class MainActivity extends Activity {
                 else if (!"loading".equals(kind)) browserNotice.setVisibility(View.GONE);
                 status.setText(result.optString("message", "Watching for Poke back…"));
                 count.setText(result.optInt("attempts") + " click attempts · " + result.optInt("detected") + " detected");
-                if ("restricted".equals(kind)) {
-                    holdRestriction(result.optString("restrictionReason", "Earlier pause; its cause was not recorded."),
-                        result.optString("restrictionSource", "legacy")); return;
-                }
-                if ("blank".equals(kind)) { queueBrowserRecovery(result.optString("message"), false); return; }
+                if ("blank".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("error".equals(kind)) { setRunning(false); status.setText(result.optString("message")); return; }
-                if ("stalled".equals(kind)) { queueRecovery(result.optString("message")); return; }
+                if ("stalled".equals(kind)) { recoverUnrenderedPage(result.optString("message")); return; }
                 if ("watching".equals(kind) || "clicked".equals(kind) || "prepared".equals(kind)) {
                     pokesExpected = true; loading = false; cancelLoadTimeout(); recovery.reset(); browserRecovery.healthy(SystemClock.elapsedRealtime());
                     // Bound navigation history during long sessions of redirected refreshes.
@@ -475,31 +477,61 @@ public final class MainActivity extends Activity {
                         historyChecked = navigation;
                         if (web.copyBackForwardList().getSize() > 8) web.clearHistory();
                         final WebView current = web;
+                        final int visualGeneration = navigation;
                         current.postVisualStateCallback(navigation, new WebView.VisualStateCallback() {
                             @Override public void onComplete(long requestId) {
-                                if (current == web && active) { current.requestLayout(); current.invalidate(); }
+                                if (current == web && active && visualGeneration == navigation) {
+                                    frameReady = true; current.requestLayout(); current.invalidate();
+                                }
                             }
                         });
                     }
                 }
                 if ("refresh".equals(kind)) { openPokes(); return; }
+                if ("watching".equals(kind) || "waiting".equals(kind)) checkVisibleFrame();
+                else whiteFrames.reset();
             } catch (Exception error) {
                 setRunning(false); status.setText("The page response could not be read. Reload Facebook to continue."); return;
             }
             schedule(500);
         });
     }
-    private String restrictionReason() {
-        return loopState.optString("holdReason", "Earlier pause; the previous version did not record its cause.");
+    private void recoverUnrenderedPage(String message) {
+        boolean forceRecreate = !desktop && mobileRecovery.blank();
+        queueBrowserRecovery(message, forceRecreate);
     }
-    private void holdRestriction(String reason, String source) {
-        try { loopState.put("held", true); loopState.put("holdReason", reason); loopState.put("holdSource", source); }
-        catch (Exception ignored) { }
-        persistState();
-        setRunning(false); status.setText("Paused: " + restrictionReason());
+    private void checkVisibleFrame() {
+        // A compositor can show white even while DOM checks say the page is ready.
+        // Sample only the browser rectangle, in memory; never save or transmit it.
+        if (web == null || desktop || loading || clickPending || recovering || !active || !hasWindowFocus()
+            || browserNotice.getVisibility() == View.VISIBLE) { whiteFrames.reset(); return; }
+        long now = SystemClock.elapsedRealtime();
+        if (!frameReady || frameProbePending || now - lastFrameProbe < 5_000
+            || web.getWidth() < 1 || web.getHeight() < 1) return;
+        lastFrameProbe = now; frameProbePending = true;
+        final WebView current = web;
+        final int generation = navigation;
+        int[] position = new int[2]; current.getLocationInWindow(position);
+        Rect area = new Rect(position[0], position[1], position[0] + current.getWidth(), position[1] + current.getHeight());
+        final Bitmap sample = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
+        try {
+            PixelCopy.request(getWindow(), area, sample, result -> {
+                frameProbePending = false;
+                try {
+                    if (result != PixelCopy.SUCCESS || current != web || generation != navigation || !active
+                        || !running || clickPending || recovering || !hasWindowFocus()) { whiteFrames.reset(); return; }
+                    int[] pixels = new int[64 * 64]; sample.getPixels(pixels, 0, 64, 0, 0, 64, 64);
+                    if (whiteFrames.observe(SystemClock.elapsedRealtime(), pixels)) {
+                        whiteFrames.reset(); recoverUnrenderedPage("The mobile browser kept displaying a white page.");
+                    }
+                } finally { sample.recycle(); }
+            }, handler);
+        } catch (IllegalArgumentException error) {
+            frameProbePending = false; whiteFrames.reset(); sample.recycle();
+        }
     }
     private void persistState() {
-        // Serialize state writes with the pre-click journal so a late write cannot clear a restriction.
+        // Keep preference writes ordered with the durable pre-click journal.
         final String serialized = loopState.toString();
         stateWriter.execute(() -> {
             if (!prefs.edit().putString("state", serialized).commit()) handler.post(() -> {
@@ -508,18 +540,6 @@ public final class MainActivity extends Activity {
         });
     }
     private void toggleLoop() {
-        if (loopState.optBoolean("held")) {
-            new AlertDialog.Builder(this).setTitle("Review AutoPoke pause")
-                .setMessage("Pause reason: " + restrictionReason() + "\n\nCheck Facebook manually. Resume after a manual poke works.")
-                .setPositiveButton("Manual poke works — resume", (d, w) -> {
-                    try { loopState.put("held", false); loopState.remove("holdReason"); loopState.remove("holdSource"); }
-                    catch (Exception ignored) { }
-                    persistState();
-                    // Reload removes the old document's held flag; keep duplicate guards.
-                    setRunning(true); openPokes();
-                }).setNegativeButton("Keep paused", null).show();
-            return;
-        }
         setRunning(!running);
         if (running && failed) openPokes();
     }
@@ -528,14 +548,14 @@ public final class MainActivity extends Activity {
         if (value && !running) { recovery.reset(); browserRecovery.reset(); }
         running = value; prefs.edit().putBoolean("running", running).apply();
         handler.removeCallbacks(poll);
-        if (!running) { recovering = false; handler.removeCallbacks(retryLoad); cancelLoadTimeout(); }
+        if (!running) { whiteFrames.reset(); recovering = false; handler.removeCallbacks(retryLoad); cancelLoadTimeout(); }
         renderControls(); if (running) { if (loading) armLoadTimeout(); schedule(100); }
     }
     private void renderControls() {
         if (toggle == null) return;
-        toggle.setText(loopState.optBoolean("held") ? "Review pause" : running ? "Stop loop" : "Start loop");
+        toggle.setText(running ? "Stop loop" : "Start loop");
         toggle.setBackground(rounded(running ? Color.rgb(250, 185, 179) : MINT, 12));
-        if (!running) status.setText(loopState.optBoolean("held") ? "Paused: " + restrictionReason() : "Loop stopped. Tap Start to watch for poke backs.");
+        if (!running) status.setText("Loop stopped. Tap Start to watch for poke backs.");
         count.setText(loopState.optInt("attempts") + " click attempts · " + (adaptive ? "adaptive refresh" : "refresh " + refreshSeconds + "s"));
         if (running && active && keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -547,15 +567,20 @@ public final class MainActivity extends Activity {
         // loadUrl also reloads an identical URL, without repeatedly growing WebView history.
         if (pokesAddress().equals(web.getUrl())) web.reload(); else web.loadUrl(pokesAddress());
     }
-    private String pokesAddress() { return freeMode ? "https://free.facebook.com/pokes" : desktop ? POKES : "https://m.facebook.com/pokes"; }
+    private String pokesAddress() {
+        // Never fall back from the carrier free address to a potentially paid address.
+        // Main-host recovery keeps the mobile UA and the mobile layout selected.
+        return mobileRecovery.address(desktop, freeMode);
+    }
     private void applyUserAgent() {
+        web.setLayerType(!desktop && mobileRecovery.useSoftware() ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_NONE, null);
         web.getSettings().setBlockNetworkImage(dataSaver);
         if (desktop) {
             // Use the installed WebView's own Chrome version rather than a stale fixed UA.
             web.getSettings().setUserAgentString(defaultUserAgent.replaceFirst("\\([^)]*\\)", "(X11; Linux x86_64)")
                 .replace("; wv", "").replace("Version/4.0 ", "").replace(" Mobile", ""));
         } else web.getSettings().setUserAgentString(defaultUserAgent);
-        web.getSettings().setUseWideViewPort(desktop); web.getSettings().setLoadWithOverviewMode(desktop);
+        web.getSettings().setUseWideViewPort(true); web.getSettings().setLoadWithOverviewMode(desktop);
     }
     private EditText number(LinearLayout form, String label, int value) {
         TextView t = text(label, 14, Color.WHITE); t.setPadding(0, dp(12), 0, dp(2)); form.addView(t);
@@ -598,7 +623,7 @@ public final class MainActivity extends Activity {
                 refreshSeconds = nextRefresh; gapSeconds = nextGap; keepAwake = awake.isChecked(); desktop = desktopBox.isChecked(); adaptive = adaptiveBox.isChecked();
                 prefs.edit().putInt("refresh", nextRefresh).putInt("gap", nextGap).putBoolean("keepAwake", keepAwake).putBoolean("desktop", desktop).putBoolean("adaptive", adaptive).apply();
                 renderControls(); dialog.dismiss();
-                if (layoutChanged) { applyUserAgent(); openPokes(); } else schedule(100);
+                if (layoutChanged) { mobileRecovery.reset(); recovery.reset(); browserRecovery.reset(); applyUserAgent(); openPokes(); } else schedule(100);
             } catch (NumberFormatException error) { refresh.setError("Enter whole seconds in both fields"); }
         }));
         dialog.show();
@@ -617,6 +642,7 @@ public final class MainActivity extends Activity {
         }
     }
     @Override protected void onPause() {
+        whiteFrames.reset();
         active = false; loopEpoch++; handler.removeCallbacks(poll); handler.removeCallbacks(retryLoad); cancelLoadTimeout(); cancelEvaluationTimeout();
         if (web != null) { web.onPause(); web.pauseTimers(); CookieManager.getInstance().flush(); }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); super.onPause();
